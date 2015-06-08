@@ -13,13 +13,6 @@ CloudFlare's NGINX servers. This is only a fragment of the configuration.
 We currently use OpenSSL 1.0.2-stable (+ patches).
 
 
-RC4 patch
----------
-
-CloudFlare uses [a patch](patches/openssl__disable_rc4.patch) that disables
-use of RC4 in TLS v1.1+. Without this patch, effective cipher list for TLS v1.1+
-will be different than the one we use in production.
-
 ChaCha20/Poly1305 patch
 -----------------------
 

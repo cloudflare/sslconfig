@@ -1,33 +1,38 @@
-From 94d51b034a7f4d0c35c74b37757d555d58d5f881 Mon Sep 17 00:00:00 2001
-From: vlad <vlad@cloudflare.com>
-Date: Mon, 2 Mar 2015 08:09:20 -0500
-Subject: [PATCH] [PATCH] Add CHACHA20-POLY1305 draft suites functionality
- compatible  with Chrome and BoringSSL
+From 68bc18b82f7437373f9c301dce8fa811490e9567 Mon Sep 17 00:00:00 2001
+From: Vlad Krasnov <vlad@cloudflare.com>
+Date: Thu, 17 Sep 2015 17:36:53 -0700
+Subject: [PATCH] CHACHA20-POLY1305 Draft 1
 
+Rebase of the original patch on top of OpenSSL 1.0.2 stable as of September 19,
+2015
 ---
- Configure                                    |  48 +-
+ Configure                                    |  50 +-
  Makefile.org                                 |   4 +-
- apps/speed.c                                 |  30 +-
+ apps/speed.c                                 |  34 +-
  crypto/chacha20poly1305/Makefile             |  92 +++
- crypto/chacha20poly1305/asm/chacha20_avx.pl  | 389 ++++++++++++
- crypto/chacha20poly1305/asm/chacha20_avx2.pl | 425 +++++++++++++
- crypto/chacha20poly1305/asm/poly1305_avx.pl  | 718 +++++++++++++++++++++
- crypto/chacha20poly1305/asm/poly1305_avx2.pl | 919 +++++++++++++++++++++++++++
- crypto/chacha20poly1305/chacha20.c           | 158 +++++
- crypto/chacha20poly1305/chacha20poly1305.h   |  77 +++
- crypto/chacha20poly1305/chapoly_test.c       | 289 +++++++++
- crypto/chacha20poly1305/poly1305.c           | 287 +++++++++
- crypto/cryptlib.c                            |  22 +-
+ crypto/chacha20poly1305/asm/chacha20_avx.pl  | 388 +++++++++++
+ crypto/chacha20poly1305/asm/chacha20_avx2.pl | 424 +++++++++++++
+ crypto/chacha20poly1305/asm/poly1305_avx.pl  | 717 +++++++++++++++++++++
+ crypto/chacha20poly1305/asm/poly1305_avx2.pl | 918 +++++++++++++++++++++++++++
+ crypto/chacha20poly1305/chacha20.c           | 157 +++++
+ crypto/chacha20poly1305/chacha20poly1305.h   |  63 ++
+ crypto/chacha20poly1305/chapolytest.c        | 287 +++++++++
+ crypto/chacha20poly1305/poly1305.c           | 285 +++++++++
+ crypto/cryptlib.c                            |  14 +-
+ crypto/crypto.h                              |   2 +-
  crypto/evp/Makefile                          |   7 +-
- crypto/evp/e_chacha20poly1305.c              | 321 ++++++++++
- crypto/evp/evp.h                             |   1 +
- ssl/s3_lib.c                                 |  60 ++
+ crypto/evp/e_chacha20poly1305.c              | 323 ++++++++++
+ crypto/evp/evp.h                             |   3 +
+ crypto/objects/obj_dat.h                     |  10 +-
+ crypto/objects/obj_mac.h                     |   4 +
+ ssl/s3_lib.c                                 |  62 +-
  ssl/ssl.h                                    |   1 +
- ssl/ssl_ciph.c                               |  17 +-
+ ssl/ssl_algs.c                               |   4 +
+ ssl/ssl_ciph.c                               |  15 +-
  ssl/ssl_locl.h                               |   1 +
- ssl/tls1.h                                   |   9 +
- test/Makefile                                |  20 +-
- 22 files changed, 3846 insertions(+), 49 deletions(-)
+ ssl/tls1.h                                   |  10 +
+ test/Makefile                                |  17 +-
+ 26 files changed, 3845 insertions(+), 47 deletions(-)
  create mode 100644 crypto/chacha20poly1305/Makefile
  create mode 100644 crypto/chacha20poly1305/asm/chacha20_avx.pl
  create mode 100644 crypto/chacha20poly1305/asm/chacha20_avx2.pl
@@ -35,15 +40,15 @@ Subject: [PATCH] [PATCH] Add CHACHA20-POLY1305 draft suites functionality
  create mode 100644 crypto/chacha20poly1305/asm/poly1305_avx2.pl
  create mode 100644 crypto/chacha20poly1305/chacha20.c
  create mode 100644 crypto/chacha20poly1305/chacha20poly1305.h
- create mode 100644 crypto/chacha20poly1305/chapoly_test.c
+ create mode 100644 crypto/chacha20poly1305/chapolytest.c
  create mode 100644 crypto/chacha20poly1305/poly1305.c
  create mode 100644 crypto/evp/e_chacha20poly1305.c
 
 diff --git a/Configure b/Configure
-index f776e23..7492c18 100755
+index d99eed7..1a7f5f3 100755
 --- a/Configure
 +++ b/Configure
-@@ -126,25 +126,25 @@ my $tlib="-lnsl -lsocket";
+@@ -143,25 +143,25 @@ my $tlib="-lnsl -lsocket";
  my $bits1="THIRTY_TWO_BIT ";
  my $bits2="SIXTY_FOUR_BIT ";
  
@@ -83,7 +88,7 @@ index f776e23..7492c18 100755
  
  # As for $BSDthreads. Idea is to maintain "collective" set of flags,
  # which would cover all BSD flavors. -pthread applies to them all, 
-@@ -689,6 +689,7 @@ my $idx_wp_obj = $idx++;
+@@ -706,6 +706,7 @@ my $idx_wp_obj = $idx++;
  my $idx_cmll_obj = $idx++;
  my $idx_modes_obj = $idx++;
  my $idx_engines_obj = $idx++;
@@ -91,7 +96,7 @@ index f776e23..7492c18 100755
  my $idx_perlasm_scheme = $idx++;
  my $idx_dso_scheme = $idx++;
  my $idx_shared_target = $idx++;
-@@ -731,6 +732,7 @@ my $bf	="crypto/bf/bf_locl.h";
+@@ -748,6 +749,7 @@ my $bf	="crypto/bf/bf_locl.h";
  my $bn_asm	="bn_asm.o";
  my $des_enc="des_enc.o fcrypt_b.o";
  my $aes_enc="aes_core.o aes_cbc.o";
@@ -99,7 +104,7 @@ index f776e23..7492c18 100755
  my $bf_enc	="bf_enc.o";
  my $cast_enc="c_enc.o";
  my $rc4_enc="rc4_enc.o rc4_skey.o";
-@@ -1189,7 +1191,7 @@ $openssldir=$prefix . "/" . $openssldir if $openssldir !~ /(^\/|^[a-zA-Z]:[\\\/]
+@@ -1206,7 +1208,7 @@ $openssldir=$prefix . "/" . $openssldir if $openssldir !~ /(^\/|^[a-zA-Z]:[\\\/]
  
  print "IsMK1MF=$IsMK1MF\n";
  
@@ -108,7 +113,7 @@ index f776e23..7492c18 100755
  my $cc = $fields[$idx_cc];
  # Allow environment CC to override compiler...
  if($ENV{CC}) {
-@@ -1217,6 +1219,7 @@ my $wp_obj = $fields[$idx_wp_obj];
+@@ -1235,6 +1237,7 @@ my $wp_obj = $fields[$idx_wp_obj];
  my $cmll_obj = $fields[$idx_cmll_obj];
  my $modes_obj = $fields[$idx_modes_obj];
  my $engines_obj = $fields[$idx_engines_obj];
@@ -116,7 +121,7 @@ index f776e23..7492c18 100755
  my $perlasm_scheme = $fields[$idx_perlasm_scheme];
  my $dso_scheme = $fields[$idx_dso_scheme];
  my $shared_target = $fields[$idx_shared_target];
-@@ -1383,7 +1386,7 @@ if ($no_asm)
+@@ -1401,7 +1404,7 @@ if ($no_asm)
  	{
  	$cpuid_obj=$bn_obj=$ec_obj=
  	$des_obj=$aes_obj=$bf_obj=$cast_obj=$rc4_obj=$rc5_obj=$cmll_obj=
@@ -125,7 +130,7 @@ index f776e23..7492c18 100755
  	}
  
  if (!$no_shared)
-@@ -1536,6 +1539,14 @@ $bf_obj=$bf_enc		unless ($bf_obj =~ /\.o$/);
+@@ -1554,6 +1557,14 @@ $bf_obj=$bf_enc		unless ($bf_obj =~ /\.o$/);
  $cast_obj=$cast_enc	unless ($cast_obj =~ /\.o$/);
  $rc4_obj=$rc4_enc	unless ($rc4_obj =~ /\.o$/);
  $rc5_obj=$rc5_enc	unless ($rc5_obj =~ /\.o$/);
@@ -140,15 +145,17 @@ index f776e23..7492c18 100755
  if ($sha1_obj =~ /\.o$/)
  	{
  #	$sha1_obj=$sha1_enc;
-@@ -1708,6 +1719,7 @@ while (<IN>)
+@@ -1733,7 +1744,8 @@ while (<IN>)
+ 	s/^RMD160_ASM_OBJ=.*$/RMD160_ASM_OBJ= $rmd160_obj/;
+ 	s/^WP_ASM_OBJ=.*$/WP_ASM_OBJ= $wp_obj/;
  	s/^CMLL_ENC=.*$/CMLL_ENC= $cmll_obj/;
- 	s/^MODES_ASM_OBJ.=*$/MODES_ASM_OBJ= $modes_obj/;
- 	s/^ENGINES_ASM_OBJ.=*$/ENGINES_ASM_OBJ= $engines_obj/;
+-	s/^MODES_ASM_OBJ.=*$/MODES_ASM_OBJ= $modes_obj/;
++	s/^MODES_ASM_OBJ.=*$/MODES_ASM_OBJ= $modes_obj/;
 +	s/^CHAPOLY_ENC=.*$/CHAPOLY_ENC= $chapoly_obj/;
+ 	s/^ENGINES_ASM_OBJ.=*$/ENGINES_ASM_OBJ= $engines_obj/;
  	s/^PERLASM_SCHEME=.*$/PERLASM_SCHEME= $perlasm_scheme/;
  	s/^PROCESSOR=.*/PROCESSOR= $processor/;
- 	s/^ARFLAGS=.*/ARFLAGS= $arflags/;
-@@ -1769,6 +1781,7 @@ print "RMD160_OBJ_ASM=$rmd160_obj\n";
+@@ -1796,6 +1808,7 @@ print "RMD160_OBJ_ASM=$rmd160_obj\n";
  print "CMLL_ENC      =$cmll_obj\n";
  print "MODES_OBJ     =$modes_obj\n";
  print "ENGINES_OBJ   =$engines_obj\n";
@@ -156,7 +163,7 @@ index f776e23..7492c18 100755
  print "PROCESSOR     =$processor\n";
  print "RANLIB        =$ranlib\n";
  print "ARFLAGS       =$arflags\n";
-@@ -2167,7 +2180,7 @@ sub print_table_entry
+@@ -2194,7 +2207,7 @@ sub print_table_entry
  	my ($cc, $cflags, $unistd, $thread_cflag, $sys_id, $lflags,
  	    $bn_ops, $cpuid_obj, $bn_obj, $ec_obj, $des_obj, $aes_obj, $bf_obj,
  	    $md5_obj, $sha1_obj, $cast_obj, $rc4_obj, $rmd160_obj,
@@ -165,7 +172,7 @@ index f776e23..7492c18 100755
  	    $perlasm_scheme, $dso_scheme, $shared_target, $shared_cflag,
  	    $shared_ldflag, $shared_extension, $ranlib, $arflags, $multilib)=
  	split(/\s*:\s*/,$table{$target} . ":" x 30 , -1);
-@@ -2198,6 +2211,7 @@ sub print_table_entry
+@@ -2225,6 +2238,7 @@ sub print_table_entry
  \$cmll_obj     = $cmll_obj
  \$modes_obj    = $modes_obj
  \$engines_obj  = $engines_obj
@@ -174,14 +181,14 @@ index f776e23..7492c18 100755
  \$dso_scheme   = $dso_scheme
  \$shared_target= $shared_target
 diff --git a/Makefile.org b/Makefile.org
-index b7a3f96..89667e4 100644
+index 48469c5..c2c5107 100644
 --- a/Makefile.org
 +++ b/Makefile.org
 @@ -91,6 +91,7 @@ BN_ASM= bn_asm.o
  EC_ASM=
  DES_ENC= des_enc.o fcrypt_b.o
  AES_ENC= aes_core.o aes_cbc.o
-+CHAPOLY_ENC= 
++CHAPOLY_ENC=
  BF_ENC= bf_enc.o
  CAST_ENC= c_enc.o
  RC4_ENC= rc4_enc.o
@@ -203,7 +210,7 @@ index b7a3f96..89667e4 100644
  		FIPSLIBDIR='${FIPSLIBDIR}'			\
  		FIPSDIR='${FIPSDIR}'				\
 diff --git a/apps/speed.c b/apps/speed.c
-index 7dcd354..106f449 100644
+index 3697b71..ecf7817 100644
 --- a/apps/speed.c
 +++ b/apps/speed.c
 @@ -226,7 +226,7 @@
@@ -241,33 +248,30 @@ index 7dcd354..106f449 100644
      double d = 0.0;
      long c[ALGOR_NUM][SIZE_NUM];
  # define R_DSA_512       0
-@@ -972,6 +973,9 @@ int MAIN(int argc, char **argv)
+@@ -972,6 +973,11 @@ int MAIN(int argc, char **argv)
              doit[D_CBC_256_CML] = 1;
          } else
  # endif
-+        if (strcmp(*argv,"chacha20-poly1305") == 0) {
++# ifndef OPENSSL_NO_CHACHA_POLY
++       if (strcmp(*argv,"chacha20-poly1305") == 0) {
 +            doit[D_CHAPOLY] = 1;
 +        } else
++# endif
  # ifndef OPENSSL_NO_RSA
          if (strcmp(*argv, "rsa") == 0) {
              rsa_doit[R_RSA_512] = 1;
-@@ -1139,6 +1143,7 @@ int MAIN(int argc, char **argv)
+@@ -1139,7 +1145,9 @@ int MAIN(int argc, char **argv)
              BIO_printf(bio_err, "rc4");
  # endif
              BIO_printf(bio_err, "\n");
+-
++# ifndef OPENSSL_NO_CHACHA_POLY
 +            BIO_printf(bio_err,"chacha20-poly1305\n");
- 
++# endif
  # ifndef OPENSSL_NO_RSA
              BIO_printf(bio_err, "rsa512   rsa1024  rsa2048  rsa4096\n");
-@@ -1287,7 +1292,6 @@ int MAIN(int argc, char **argv)
-     dsa_key[1] = get_dsa1024();
-     dsa_key[2] = get_dsa2048();
  # endif
--
- # ifndef OPENSSL_NO_DES
-     DES_set_key_unchecked(&key, &sch);
-     DES_set_key_unchecked(&key2, &sch2);
-@@ -1370,6 +1374,7 @@ int MAIN(int argc, char **argv)
+@@ -1370,6 +1378,7 @@ int MAIN(int argc, char **argv)
      c[D_IGE_192_AES][0] = count;
      c[D_IGE_256_AES][0] = count;
      c[D_GHASH][0] = count;
@@ -275,16 +279,15 @@ index 7dcd354..106f449 100644
  
      for (i = 1; i < SIZE_NUM; i++) {
          c[D_MD2][i] = c[D_MD2][0] * 4 * lengths[0] / lengths[i];
-@@ -1820,7 +1825,22 @@ int MAIN(int argc, char **argv)
+@@ -1862,6 +1871,23 @@ int MAIN(int argc, char **argv)
          }
-         CRYPTO_gcm128_release(ctx);
      }
--# endif
-+# endif	
+ # endif
++# ifndef OPENSSL_NO_CHACHA_POLY
 +    if (doit[D_CHAPOLY]) {
 +        EVP_CIPHER_CTX ctx;
 +        EVP_CIPHER_CTX_init(&ctx);
-+        EVP_CipherInit_ex(&ctx,EVP_chacha20_poly1305(),NULL,key32,NULL,1);	
++        EVP_CipherInit_ex(&ctx,EVP_chacha20_poly1305(),NULL,key32,NULL,1);
 +        for (j=0; j<SIZE_NUM; j++) {
 +            print_message(names[D_CHAPOLY],c[D_CHAPOLY][j],lengths[j]);
 +            Time_F(START);
@@ -296,19 +299,19 @@ index 7dcd354..106f449 100644
 +            print_result(D_CHAPOLY,j,count,d);
 +        }
 +    }
- # ifndef OPENSSL_NO_CAMELLIA
-     if (doit[D_CBC_128_CML]) {
++# endif
+ # ifndef OPENSSL_NO_IDEA
+     if (doit[D_CBC_IDEA]) {
          for (j = 0; j < SIZE_NUM; j++) {
 diff --git a/crypto/chacha20poly1305/Makefile b/crypto/chacha20poly1305/Makefile
 new file mode 100644
-index 0000000..7af92f9
+index 0000000..f21dd2e
 --- /dev/null
 +++ b/crypto/chacha20poly1305/Makefile
 @@ -0,0 +1,92 @@
 +#
-+# crypto/chacha20poly1305/Makefile
++#  crypto/chacha20poly1305/Makefile
 +#
-+
 +DIR=	chacha20poly1305
 +TOP=	../..
 +CC=	cc
@@ -318,6 +321,7 @@ index 0000000..7af92f9
 +MAKEFILE=	Makefile
 +AR=		ar r
 +
++
 +CHAPOLY_ENC=
 +
 +CFLAGS= $(INCLUDES) $(CFLAG)
@@ -325,7 +329,7 @@ index 0000000..7af92f9
 +AFLAGS= $(ASFLAGS)
 +
 +GENERAL=Makefile
-+TEST=chapoly_test.c
++TEST=chapolytest.c
 +APPS=
 +
 +LIB=$(TOP)/libcrypto.a
@@ -399,14 +403,14 @@ index 0000000..7af92f9
 +poly1305.o: ../../include/openssl/chacha20poly1305.h poly1305.c
 diff --git a/crypto/chacha20poly1305/asm/chacha20_avx.pl b/crypto/chacha20poly1305/asm/chacha20_avx.pl
 new file mode 100644
-index 0000000..a033ee5
+index 0000000..7b5b763
 --- /dev/null
 +++ b/crypto/chacha20poly1305/asm/chacha20_avx.pl
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,388 @@
 +#!/usr/bin/env perl
 +
 +##############################################################################
-+#                                                                            # 
++#                                                                            #
 +# Copyright 2014 Intel Corporation                                           #
 +#                                                                            #
 +# Licensed under the Apache License, Version 2.0 (the "License");            #
@@ -420,18 +424,18 @@ index 0000000..a033ee5
 +# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
 +# See the License for the specific language governing permissions and        #
 +# limitations under the License.                                             #
-+#                                                                            # 
++#                                                                            #
 +##############################################################################
-+#                                                                            # 
-+#  Developers and authors:                                                   # 
-+#  Shay Gueron (1, 2), and Vlad Krasnov (1)                                  # 
-+#  (1) Intel Corporation, Israel Development Center                          # 
-+#  (2) University of Haifa                                                   # 
++#                                                                            #
++#  Developers and authors:                                                   #
++#  Shay Gueron (1, 2), and Vlad Krasnov (1)                                  #
++#  (1) Intel Corporation, Israel Development Center                          #
++#  (2) University of Haifa                                                   #
 +#                                                                            #
 +# Related work:                                                              #
 +# M. Goll, S. Gueron, "Vectorization on ChaCha Stream Cipher", IEEE          #
 +#          Proceedings of 11th International Conference on Information       #
-+#          Technology: New Generations (ITNG 2014), 612-615 (2014).          # 
++#          Technology: New Generations (ITNG 2014), 612-615 (2014).          #
 +# M. Goll, S. Gueron, "Vectorization on Poly1305 Message Authentication Code"#
 +#           to be published.                                                 #
 +# A. Langley, chacha20poly1305 for the AEAD head                             #
@@ -526,7 +530,7 @@ index 0000000..a033ee5
 +   =("%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9", "%rax");
 +
 +$code.=<<___;
-+.globl chacha_20_core_avx	
++.globl chacha_20_core_avx
 +.type  chacha_20_core_avx ,\@function,2
 +.align 64
 +chacha_20_core_avx:
@@ -588,7 +592,7 @@ index 0000000..a033ee5
 +		vpalignr \$12, $v9, $v9, $v9
 +		vpalignr \$8, $v10, $v10, $v10
 +		vpalignr \$4, $v11, $v11, $v11
-+	
++
 +		dec	$nr
 +
 +	jnz	1b
@@ -596,15 +600,15 @@ index 0000000..a033ee5
 +	vpaddd	chacha20_consts(%rip), $v0, $v0
 +	vpaddd	chacha20_consts(%rip), $v4, $v4
 +	vpaddd	chacha20_consts(%rip), $v8, $v8
-+	
++
 +	vpaddd	$state_4567, $v1, $v1
 +	vpaddd	$state_4567, $v5, $v5
 +	vpaddd	$state_4567, $v9, $v9
-+	
++
 +	vpaddd	$state_89ab, $v2, $v2
 +	vpaddd	$state_89ab, $v6, $v6
 +	vpaddd	$state_89ab, $v10, $v10
-+	
++
 +	vpaddd	$state_cdef, $v3, $v3
 +	vpaddq	.avxInc(%rip), $state_cdef, $state_cdef
 +	vpaddd	$state_cdef, $v7, $v7
@@ -685,20 +689,20 @@ index 0000000..a033ee5
 +		vpalignr \$12, $v5, $v5, $v5
 +		vpalignr \$8, $v6, $v6, $v6
 +		vpalignr \$4, $v7, $v7, $v7
-+	
++
 +		dec	$nr
 +
 +	jnz	1b
 +
 +	vpaddd	chacha20_consts(%rip), $v0, $v0
 +	vpaddd	chacha20_consts(%rip), $v4, $v4
-+	
++
 +	vpaddd	$state_4567, $v1, $v1
 +	vpaddd	$state_4567, $v5, $v5
-+	
++
 +	vpaddd	$state_89ab, $v2, $v2
 +	vpaddd	$state_89ab, $v6, $v6
-+	
++
 +	vpaddd	$state_cdef, $v3, $v3
 +	vpaddq	.avxInc(%rip), $state_cdef, $state_cdef
 +	vpaddd	$state_cdef, $v7, $v7
@@ -791,17 +795,16 @@ index 0000000..a033ee5
 +print $code;
 +
 +close STDOUT;
-+
 diff --git a/crypto/chacha20poly1305/asm/chacha20_avx2.pl b/crypto/chacha20poly1305/asm/chacha20_avx2.pl
 new file mode 100644
-index 0000000..8b6a8b8
+index 0000000..31ae721
 --- /dev/null
 +++ b/crypto/chacha20poly1305/asm/chacha20_avx2.pl
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,424 @@
 +#!/usr/bin/env perl
 +
 +##############################################################################
-+#                                                                            # 
++#                                                                            #
 +# Copyright 2014 Intel Corporation                                           #
 +#                                                                            #
 +# Licensed under the Apache License, Version 2.0 (the "License");            #
@@ -815,18 +818,18 @@ index 0000000..8b6a8b8
 +# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
 +# See the License for the specific language governing permissions and        #
 +# limitations under the License.                                             #
-+#                                                                            # 
++#                                                                            #
 +##############################################################################
-+#                                                                            # 
-+#  Developers and authors:                                                   # 
-+#  Shay Gueron (1, 2), and Vlad Krasnov (1)                                  # 
-+#  (1) Intel Corporation, Israel Development Center                          # 
-+#  (2) University of Haifa                                                   # 
++#                                                                            #
++#  Developers and authors:                                                   #
++#  Shay Gueron (1, 2), and Vlad Krasnov (1)                                  #
++#  (1) Intel Corporation, Israel Development Center                          #
++#  (2) University of Haifa                                                   #
 +#                                                                            #
 +# Related work:                                                              #
 +# M. Goll, S. Gueron, "Vectorization on ChaCha Stream Cipher", IEEE          #
 +#          Proceedings of 11th International Conference on Information       #
-+#          Technology: New Generations (ITNG 2014), 612-615 (2014).          # 
++#          Technology: New Generations (ITNG 2014), 612-615 (2014).          #
 +# M. Goll, S. Gueron, "Vectorization on Poly1305 Message Authentication Code"#
 +#           to be published.                                                 #
 +# A. Langley, chacha20poly1305 for the AEAD head                             #
@@ -926,7 +929,7 @@ index 0000000..8b6a8b8
 +   =("%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9", "%rax");
 +
 +$code.=<<___;
-+.globl chacha_20_core_avx2	
++.globl chacha_20_core_avx2
 +.type  chacha_20_core_avx2 ,\@function,2
 +.align 64
 +chacha_20_core_avx2:
@@ -991,7 +994,7 @@ index 0000000..8b6a8b8
 +		vpalignr \$12, $v9, $v9, $v9
 +		vpalignr \$8, $v10, $v10, $v10
 +		vpalignr \$4, $v11, $v11, $v11
-+	
++
 +		dec	$nr
 +
 +	jnz	1b
@@ -999,15 +1002,15 @@ index 0000000..8b6a8b8
 +	vpaddd	chacha20_consts(%rip), $v0, $v0
 +	vpaddd	chacha20_consts(%rip), $v4, $v4
 +	vpaddd	chacha20_consts(%rip), $v8, $v8
-+	
++
 +	vpaddd	$state_4567, $v1, $v1
 +	vpaddd	$state_4567, $v5, $v5
 +	vpaddd	$state_4567, $v9, $v9
-+	
++
 +	vpaddd	$state_89ab, $v2, $v2
 +	vpaddd	$state_89ab, $v6, $v6
 +	vpaddd	$state_89ab, $v10, $v10
-+	
++
 +	vpaddd	$state_cdef, $v3, $v3
 +	vpaddq	.avx2Inc(%rip), $state_cdef, $state_cdef
 +	vpaddd	$state_cdef, $v7, $v7
@@ -1057,7 +1060,7 @@ index 0000000..8b6a8b8
 +	vmovdqu	$v1, 32*9($out)
 +	vmovdqu	$v2, 32*10($out)
 +	vmovdqu	$v3, 32*11($out)
-+	
++
 +	lea	64*6($in), $in
 +	lea	64*6($out), $out
 +	sub	\$64*6, $in_len
@@ -1101,20 +1104,20 @@ index 0000000..8b6a8b8
 +		vpalignr \$12, $v5, $v5, $v5
 +		vpalignr \$8, $v6, $v6, $v6
 +		vpalignr \$4, $v7, $v7, $v7
-+	
++
 +		dec	$nr
 +
 +	jnz	1b
 +
 +	vpaddd	chacha20_consts(%rip), $v0, $v0
 +	vpaddd	chacha20_consts(%rip), $v4, $v4
-+	
++
 +	vpaddd	$state_4567, $v1, $v1
 +	vpaddd	$state_4567, $v5, $v5
-+	
++
 +	vpaddd	$state_89ab, $v2, $v2
 +	vpaddd	$state_89ab, $v6, $v6
-+	
++
 +	vpaddd	$state_cdef, $v3, $v3
 +	vpaddq	.avx2Inc(%rip), $state_cdef, $state_cdef
 +	vpaddd	$state_cdef, $v7, $v7
@@ -1222,15 +1225,14 @@ index 0000000..8b6a8b8
 +print $code;
 +
 +close STDOUT;
-+
 diff --git a/crypto/chacha20poly1305/asm/poly1305_avx.pl b/crypto/chacha20poly1305/asm/poly1305_avx.pl
 new file mode 100644
-index 0000000..dad8828
+index 0000000..2d06e41
 --- /dev/null
 +++ b/crypto/chacha20poly1305/asm/poly1305_avx.pl
-@@ -0,0 +1,718 @@
+@@ -0,0 +1,717 @@
 +##############################################################################
-+#                                                                            # 
++#                                                                            #
 +# Copyright 2014 Intel Corporation                                           #
 +#                                                                            #
 +# Licensed under the Apache License, Version 2.0 (the "License");            #
@@ -1244,14 +1246,14 @@ index 0000000..dad8828
 +# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
 +# See the License for the specific language governing permissions and        #
 +# limitations under the License.                                             #
-+#                                                                            # 
++#                                                                            #
 +##############################################################################
-+#                                                                            # 
-+#  Developers and authors:                                                   # 
-+#  Shay Gueron (1, 2), and Vlad Krasnov (1)                                  # 
-+#  (1) Intel Corporation, Israel Development Center                          # 
-+#  (2) University of Haifa                                                   # 
-+#                                                                            # 
++#                                                                            #
++#  Developers and authors:                                                   #
++#  Shay Gueron (1, 2), and Vlad Krasnov (1)                                  #
++#  (1) Intel Corporation, Israel Development Center                          #
++#  (2) University of Haifa                                                   #
++#                                                                            #
 +##############################################################################
 +# state:
 +#  0: r[0] || r^2[0]
@@ -1373,8 +1375,8 @@ index 0000000..dad8828
 +	vpaddq		$T0, $A3, $A3
 +	vpmuludq	$r3, $r1, $T0
 +	vpaddq		$T0, $A4, $A4
-+	vpmuludq	$r4, $r1, $A5	
-+	
++	vpmuludq	$r4, $r1, $A5
++
 +	vpsllq		\$1, $A3, $A3
 +	vpsllq		\$1, $A4, $A4
 +	vpmuludq	$r2, $r2, $T0
@@ -1382,13 +1384,13 @@ index 0000000..dad8828
 +	vpmuludq	$r3, $r2, $T0
 +	vpaddq		$T0, $A5, $A5
 +	vpmuludq	$r4, $r2, $A6
-+	
++
 +	vpsllq		\$1, $A5, $A5
 +	vpsllq		\$1, $A6, $A6
 +	vpmuludq	$r3, $r3, $T0
 +	vpaddq		$T0, $A6, $A6
 +	vpmuludq	$r4, $r3, $A7
-+	
++
 +	vpsllq		\$1, $A7, $A7
 +	vpmuludq	$r4, $r4, $A8
 +
@@ -1521,13 +1523,13 @@ index 0000000..dad8828
 +		vpxor	.LsetBit(%rip), $R2, $R2
 +		vpaddq	$R0, $A3, $A3
 +		vpaddq	$R2, $A4, $A4
-+	
++
 +		# Multiply input by R[0]
 +		vbroadcastss	$_r0_($state), $T0
 +		vpmuludq	$T0, $A0, $R0
 +		vpmuludq	$T0, $A1, $R1
 +		vpmuludq	$T0, $A2, $R2
-+		vpmuludq	$T0, $A3, $R3	
++		vpmuludq	$T0, $A3, $R3
 +		vpmuludq	$T0, $A4, $R4
 +		# Multiply input by R[1] (and R[1]*5)
 +		vbroadcastss	$_r1_x5($state), $T0
@@ -1555,7 +1557,7 @@ index 0000000..dad8828
 +		vpaddq		$T1, $R3, $R3
 +		vpmuludq	$T0, $A2, $T1
 +		vpaddq		$T1, $R4, $R4
-+	
++
 +		vbroadcastss	$_r3_x5($state), $T0
 +		vpmuludq	$T0, $A2, $T1
 +		vpaddq		$T1, $R0, $R0
@@ -1568,7 +1570,7 @@ index 0000000..dad8828
 +		vpaddq		$T1, $R3, $R3
 +		vpmuludq	$T0, $A1, $T1
 +		vpaddq		$T1, $R4, $R4
-+		
++
 +		vbroadcastss	$_r4_x5($state), $T0
 +		vpmuludq	$T0, $A1, $T1
 +		vpaddq		$T1, $R0, $R0
@@ -1590,8 +1592,8 @@ index 0000000..dad8828
 +		vpsllq	\$2, $T0, $T1
 +		vpaddq	$T1, $T0, $T0
 +		vpaddq	$T0, $R0, $R0
-+		vpand	$AND_MASK, $R4, $R4		
-+	
++		vpand	$AND_MASK, $R4, $R4
++
 +		vpsrlq	\$26, $R0, $T0
 +		vpand	$AND_MASK, $R0, $A0
 +		vpaddq	$T0, $R1, $R1
@@ -1636,13 +1638,13 @@ index 0000000..dad8828
 +	vpxor	.LsetBit(%rip), $R2, $R2
 +	vpaddq	$R0, $A3, $A3
 +	vpaddq	$R2, $A4, $A4
-+	
++
 +	# Multiply input by R[0]
 +	vmovdqu		$_r0_($state), $T0
 +	vpmuludq	$T0, $A0, $R0
 +	vpmuludq	$T0, $A1, $R1
 +	vpmuludq	$T0, $A2, $R2
-+	vpmuludq	$T0, $A3, $R3	
++	vpmuludq	$T0, $A3, $R3
 +	vpmuludq	$T0, $A4, $R4
 +	# Multiply input by R[1] (and R[1]*5)
 +	vmovdqu		$_r1_x5($state), $T0
@@ -1683,7 +1685,7 @@ index 0000000..dad8828
 +	vpaddq		$T1, $R3, $R3
 +	vpmuludq	$T0, $A1, $T1
 +	vpaddq		$T1, $R4, $R4
-+	
++
 +	vmovdqu		$_r4_x5($state), $T0
 +	vpmuludq	$T0, $A1, $T1
 +	vpaddq		$T1, $R0, $R0
@@ -1758,13 +1760,13 @@ index 0000000..dad8828
 +	vpxor	.LsetBit(%rip), $R2, $R2
 +	vpaddq	$R0, $A3, $A3
 +	vpaddq	$R2, $A4, $A4
-+2:	
++2:
 +	# Multiply input by R[0]
 +	vmovq		$_r0_+8($state), $T0
 +	vpmuludq	$T0, $A0, $R0
 +	vpmuludq	$T0, $A1, $R1
 +	vpmuludq	$T0, $A2, $R2
-+	vpmuludq	$T0, $A3, $R3	
++	vpmuludq	$T0, $A3, $R3
 +	vpmuludq	$T0, $A4, $R4
 +	# Multiply input by R[1] (and R[1]*5)
 +	vmovq		$_r1_x5+8($state), $T0
@@ -1805,7 +1807,7 @@ index 0000000..dad8828
 +	vpaddq		$T1, $R3, $R3
 +	vpmuludq	$T0, $A1, $T1
 +	vpaddq		$T1, $R4, $R4
-+	
++
 +	vmovq		$_r4_x5+8($state), $T0
 +	vpmuludq	$T0, $A1, $T1
 +	vpaddq		$T1, $R0, $R0
@@ -1818,7 +1820,7 @@ index 0000000..dad8828
 +	vmovq		$_r4_+8($state), $T0
 +	vpmuludq	$T0, $A0, $T1
 +	vpaddq		$T1, $R4, $R4
-+	
++
 +	# Reduce
 +	vpsrlq	\$26, $R3, $T0
 +	vpaddq	$T0, $R4, $R4
@@ -1827,7 +1829,7 @@ index 0000000..dad8828
 +	vpsllq	\$2, $T0, $T1
 +	vpaddq	$T1, $T0, $T0
 +	vpaddq	$T0, $R0, $R0
-+	vpand	$AND_MASK, $R4, $R4		
++	vpand	$AND_MASK, $R4, $R4
 +	vpsrlq	\$26, $R0, $T0
 +	vpand	$AND_MASK, $R0, $A0
 +	vpaddq	$T0, $R1, $R1
@@ -1874,7 +1876,7 @@ index 0000000..dad8828
 +	vpaddq	$R2, $A4, $A4
 +        xor	$in_len, $in_len
 +	jmp	2b
-+1:      
++1:
 +	vmovd	$A0, $_A0_($state)
 +	vmovd	$A1, $_A1_($state)
 +	vmovd	$A2, $_A2_($state)
@@ -1938,7 +1940,7 @@ index 0000000..dad8828
 +	mov	%rdx, 8($mac)
 +	vzeroupper
 +	ret
-+.size poly1305_finish_avx,.-poly1305_finish_avx	
++.size poly1305_finish_avx,.-poly1305_finish_avx
 +___
 +}
 +}}
@@ -1946,15 +1948,14 @@ index 0000000..dad8828
 +$code =~ s/\`([^\`]*)\`/eval($1)/gem;
 +print $code;
 +close STDOUT;
-+
 diff --git a/crypto/chacha20poly1305/asm/poly1305_avx2.pl b/crypto/chacha20poly1305/asm/poly1305_avx2.pl
 new file mode 100644
-index 0000000..401fee4
+index 0000000..8134542
 --- /dev/null
 +++ b/crypto/chacha20poly1305/asm/poly1305_avx2.pl
-@@ -0,0 +1,919 @@
+@@ -0,0 +1,918 @@
 +##############################################################################
-+#                                                                            # 
++#                                                                            #
 +# Copyright 2014 Intel Corporation                                           #
 +#                                                                            #
 +# Licensed under the Apache License, Version 2.0 (the "License");            #
@@ -1968,14 +1969,14 @@ index 0000000..401fee4
 +# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
 +# See the License for the specific language governing permissions and        #
 +# limitations under the License.                                             #
-+#                                                                            # 
++#                                                                            #
 +##############################################################################
-+#                                                                            # 
-+#  Developers and authors:                                                   # 
-+#  Shay Gueron (1, 2), and Vlad Krasnov (1)                                  # 
-+#  (1) Intel Corporation, Israel Development Center                          # 
-+#  (2) University of Haifa                                                   # 
-+#                                                                            # 
++#                                                                            #
++#  Developers and authors:                                                   #
++#  Shay Gueron (1, 2), and Vlad Krasnov (1)                                  #
++#  (1) Intel Corporation, Israel Development Center                          #
++#  (2) University of Haifa                                                   #
++#                                                                            #
 +##############################################################################
 +# state:
 +#  0: r[0] || r^2[0]
@@ -2084,7 +2085,7 @@ index 0000000..401fee4
 +	vmovq	8*1($key), $T0
 +	vpand	.LrSet(%rip), $r0, $r0
 +	vpand	.LrSet+32(%rip), $T0, $T0
-+	
++
 +	vpsrlq	\$26, $r0, $r1
 +	vpand	.LandMask(%rip), $r0, $r0
 +	vpsrlq	\$26, $r1, $r2
@@ -2110,8 +2111,8 @@ index 0000000..401fee4
 +	vpaddq		$T0, $A3, $A3
 +	vpmuludq	$r3, $r1, $T0
 +	vpaddq		$T0, $A4, $A4
-+	vpmuludq	$r4, $r1, $A5	
-+	
++	vpmuludq	$r4, $r1, $A5
++
 +	vpsllq		\$1, $A3, $A3
 +	vpsllq		\$1, $A4, $A4
 +	vpmuludq	$r2, $r2, $T0
@@ -2119,13 +2120,13 @@ index 0000000..401fee4
 +	vpmuludq	$r3, $r2, $T0
 +	vpaddq		$T0, $A5, $A5
 +	vpmuludq	$r4, $r2, $A6
-+	
++
 +	vpsllq		\$1, $A5, $A5
 +	vpsllq		\$1, $A6, $A6
 +	vpmuludq	$r3, $r3, $T0
 +	vpaddq		$T0, $A6, $A6
 +	vpmuludq	$r4, $r3, $A7
-+	
++
 +	vpsllq		\$1, $A7, $A7
 +	vpmuludq	$r4, $r4, $A8
 +
@@ -2200,7 +2201,7 @@ index 0000000..401fee4
 +	vpmuludq	$T0, $A0, $r0
 +	vpmuludq	$T0, $A1, $r1
 +	vpmuludq	$T0, $A2, $r2
-+	vpmuludq	$T0, $A3, $r3	
++	vpmuludq	$T0, $A3, $r3
 +	vpmuludq	$T0, $A4, $r4
 +	# Multiply input by R[1] (and R[1]*5)
 +	vmovdqu		$_r1_x5+16($state), $T0
@@ -2241,7 +2242,7 @@ index 0000000..401fee4
 +	vpaddq		$T1, $r3, $r3
 +	vpmuludq	$T0, $A1, $T1
 +	vpaddq		$T1, $r4, $r4
-+	
++
 +	vmovdqu		$_r4_x5+16($state), $T0
 +	vpmuludq	$T0, $A1, $T1
 +	vpaddq		$T1, $r0, $r0
@@ -2275,7 +2276,7 @@ index 0000000..401fee4
 +	vpsrlq	\$26, $r3, $T0
 +	vpand	.LandMask(%rip), $r3, $r3
 +	vpaddq	$T0, $r4, $r4
-+	
++
 +	vmovdqu	$r0, $_r0_($state)
 +	vmovdqu	$r1, $_r1_($state)
 +	vmovdqu	$r2, $_r2_($state)
@@ -2345,7 +2346,7 @@ index 0000000..401fee4
 +
 +		vpermq	\$0xD8, $R0, $R0	# it is possible to rearrange the precomputations, and save this shuffle
 +		vpermq	\$0xD8, $R1, $R1
-+		
++
 +		vpsrlq	\$26, $R0, $R2
 +		vpand	$AND_MASK, $R0, $R0
 +		vpaddq	$R0, $A0, $A0
@@ -2365,13 +2366,13 @@ index 0000000..401fee4
 +		vpxor	.LsetBit(%rip), $R2, $R2
 +		vpaddq	$R0, $A3, $A3
 +		vpaddq	$R2, $A4, $A4
-+	
++
 +		# Multiply input by R[0]
 +		vpbroadcastq	$_r0_($state), $T0
 +		vpmuludq	$T0, $A0, $R0
 +		vpmuludq	$T0, $A1, $R1
 +		vpmuludq	$T0, $A2, $R2
-+		vpmuludq	$T0, $A3, $R3	
++		vpmuludq	$T0, $A3, $R3
 +		vpmuludq	$T0, $A4, $R4
 +		# Multiply input by R[1] (and R[1]*5)
 +		vpbroadcastq	$_r1_x5($state), $T0
@@ -2399,7 +2400,7 @@ index 0000000..401fee4
 +		vpaddq		$T1, $R3, $R3
 +		vpmuludq	$T0, $A2, $T1
 +		vpaddq		$T1, $R4, $R4
-+	
++
 +		vpbroadcastq	$_r3_x5($state), $T0
 +		vpmuludq	$T0, $A2, $T1
 +		vpaddq		$T1, $R0, $R0
@@ -2412,7 +2413,7 @@ index 0000000..401fee4
 +		vpaddq		$T1, $R3, $R3
 +		vpmuludq	$T0, $A1, $T1
 +		vpaddq		$T1, $R4, $R4
-+		
++
 +		vpbroadcastq	$_r4_x5($state), $T0
 +		vpmuludq	$T0, $A1, $T1
 +		vpaddq		$T1, $R0, $R0
@@ -2434,8 +2435,8 @@ index 0000000..401fee4
 +		vpsllq	\$2, $T0, $T1
 +		vpaddq	$T1, $T0, $T0
 +		vpaddq	$T0, $R0, $R0
-+		vpand	$AND_MASK, $R4, $R4		
-+	
++		vpand	$AND_MASK, $R4, $R4
++
 +		vpsrlq	\$26, $R0, $T0
 +		vpand	$AND_MASK, $R0, $A0
 +		vpaddq	$T0, $R1, $R1
@@ -2464,7 +2465,7 @@ index 0000000..401fee4
 +
 +	vpermq	\$0xD8, $R0, $R0
 +	vpermq	\$0xD8, $R1, $R1
-+	
++
 +	vpsrlq	\$26, $R0, $R2
 +	vpand	$AND_MASK, $R0, $R0
 +	vpaddq	$R0, $A0, $A0
@@ -2484,13 +2485,13 @@ index 0000000..401fee4
 +	vpxor	.LsetBit(%rip), $R2, $R2
 +	vpaddq	$R0, $A3, $A3
 +	vpaddq	$R2, $A4, $A4
-+	
++
 +	# Multiply input by R[0]
 +	vmovdqu		$_r0_($state), $T0
 +	vpmuludq	$T0, $A0, $R0
 +	vpmuludq	$T0, $A1, $R1
 +	vpmuludq	$T0, $A2, $R2
-+	vpmuludq	$T0, $A3, $R3	
++	vpmuludq	$T0, $A3, $R3
 +	vpmuludq	$T0, $A4, $R4
 +	# Multiply input by R[1] (and R[1]*5)
 +	vmovdqu		$_r1_x5($state), $T0
@@ -2531,7 +2532,7 @@ index 0000000..401fee4
 +	vpaddq		$T1, $R3, $R3
 +	vpmuludq	$T0, $A1, $T1
 +	vpaddq		$T1, $R4, $R4
-+	
++
 +	vmovdqu		$_r4_x5($state), $T0
 +	vpmuludq	$T0, $A1, $T1
 +	vpaddq		$T1, $R0, $R0
@@ -2552,7 +2553,7 @@ index 0000000..401fee4
 +	vpsllq	\$2, $T0, $T1
 +	vpaddq	$T1, $T0, $T0
 +	vpaddq	$T0, $R0, $R0
-+	vpand	$AND_MASK, $R4, $R4		
++	vpand	$AND_MASK, $R4, $R4
 +	vpsrlq	\$26, $R0, $T0
 +	vpand	$AND_MASK, $R0, $A0
 +	vpaddq	$T0, $R1, $R1
@@ -2686,14 +2687,14 @@ index 0000000..401fee4
 +	vpxor	$SET_MASK, $R2, $R2
 +	vpaddq	$R0, $A3, $A3
 +	vpaddq	$R2, $A4, $A4
-+	
++
 +	# Multiply input by R[0]
 +	vmovdqu		$_r0_($state), $T0
 +	vpermd		$T0, $PERM_MASK, $T0
 +	vpmuludq	$T0, $A0, $R0
 +	vpmuludq	$T0, $A1, $R1
 +	vpmuludq	$T0, $A2, $R2
-+	vpmuludq	$T0, $A3, $R3	
++	vpmuludq	$T0, $A3, $R3
 +	vpmuludq	$T0, $A4, $R4
 +	# Multiply input by R[1] (and R[1]*5)
 +	vmovdqu		$_r1_x5($state), $T0
@@ -2740,7 +2741,7 @@ index 0000000..401fee4
 +	vpaddq		$T1, $R3, $R3
 +	vpmuludq	$T0, $A1, $T1
 +	vpaddq		$T1, $R4, $R4
-+	
++
 +	vmovdqu		$_r4_x5($state), $T0
 +	vpermd		$T0, $PERM_MASK, $T0
 +	vpmuludq	$T0, $A1, $T1
@@ -2763,7 +2764,7 @@ index 0000000..401fee4
 +	vpsllq	\$2, $T0, $T1
 +	vpaddq	$T1, $T0, $T0
 +	vpaddq	$T0, $R0, $R0
-+	vpand	$AND_MASK, $R4, $R4		
++	vpand	$AND_MASK, $R4, $R4
 +	vpsrlq	\$26, $R0, $T0
 +	vpand	$AND_MASK, $R0, $A0
 +	vpaddq	$T0, $R1, $R1
@@ -2863,7 +2864,7 @@ index 0000000..401fee4
 +	mov	%rdx, 8($mac)
 +
 +	ret
-+.size poly1305_finish_avx2,.-poly1305_finish_avx2	
++.size poly1305_finish_avx2,.-poly1305_finish_avx2
 +___
 +}
 +}}
@@ -2871,13 +2872,12 @@ index 0000000..401fee4
 +$code =~ s/\`([^\`]*)\`/eval(\$1)/gem;
 +print $code;
 +close STDOUT;
-+
 diff --git a/crypto/chacha20poly1305/chacha20.c b/crypto/chacha20poly1305/chacha20.c
 new file mode 100644
-index 0000000..c16e0aa
+index 0000000..72ab173
 --- /dev/null
 +++ b/crypto/chacha20poly1305/chacha20.c
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,157 @@
 +/* Copyright (c) 2014, Google Inc.
 + *
 + * Permission to use, copy, modify, and/or distribute this software for any
@@ -2894,7 +2894,7 @@ index 0000000..c16e0aa
 +
 +/* Adapted from the public domain, estream code by D. Bernstein. */
 +
-+#include "chacha20poly1305.h"
++#include <openssl/chacha20poly1305.h>
 +
 +/* sigma contains the ChaCha constants, which happen to be an ASCII string. */
 +static const char sigma[16] = "expand 32-byte k";
@@ -2966,13 +2966,13 @@ index 0000000..c16e0aa
 +
 +#ifdef CHAPOLY_x86_64_ASM
 +
-+  if ((OPENSSL_ia32cap_loc()[1] >> 5) & 1)
++  if ((OPENSSL_ia32cap_loc()[2] >> 5) & 1)
 +    {
 +    buf_size = 128;
 +    core_func = chacha_20_core_avx2;
 +    ctr_msk = -2;
 +    }
-+  else if ((OPENSSL_ia32cap_loc()[0] >> 60) & 1)
++  else if ((OPENSSL_ia32cap_loc()[1] >> 28) & 1)
 +    {
 +    buf_size = 64;
 +    core_func = chacha_20_core_avx;
@@ -3035,27 +3035,12 @@ index 0000000..c16e0aa
 +    ((uint64_t*)input)[6]++;
 +  }
 +}
-+
 diff --git a/crypto/chacha20poly1305/chacha20poly1305.h b/crypto/chacha20poly1305/chacha20poly1305.h
 new file mode 100644
-index 0000000..88ccf5d
+index 0000000..bcabbb4
 --- /dev/null
 +++ b/crypto/chacha20poly1305/chacha20poly1305.h
-@@ -0,0 +1,77 @@
-+/* Copyright (c) 2014, Google Inc.
-+ *
-+ * Permission to use, copy, modify, and/or distribute this software for any
-+ * purpose with or without fee is hereby granted, provided that the above
-+ * copyright notice and this permission notice appear in all copies.
-+ *
-+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
-+ * SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
-+ * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
-+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. */
-+
+@@ -0,0 +1,63 @@
 +#ifndef OPENSSL_HEADER_POLY1305_H
 +#define OPENSSL_HEADER_POLY1305_H
 +
@@ -3079,7 +3064,7 @@ index 0000000..88ccf5d
 + * enable several messages to be authenticated with the same key. */
 +void CRYPTO_poly1305_init(poly1305_state* state, const uint8_t key[32]);
 +
-+/* CRYPTO_poly1305_update processes |in_len| bytes from |in|. It can be called 
++/* CRYPTO_poly1305_update processes |in_len| bytes from |in|. It can be called
 + * zero or more times after poly1305_init. */
 +void CRYPTO_poly1305_update(poly1305_state* state, const uint8_t* in,
 +                            size_t in_len);
@@ -3113,18 +3098,18 @@ index 0000000..88ccf5d
 +                      size_t counter);
 +#endif
 +
-+					  
++
 +#if defined(__cplusplus)
 +}  /* extern C */
 +#endif
 +
 +#endif  /* OPENSSL_HEADER_POLY1305_H */
-diff --git a/crypto/chacha20poly1305/chapoly_test.c b/crypto/chacha20poly1305/chapoly_test.c
+diff --git a/crypto/chacha20poly1305/chapolytest.c b/crypto/chacha20poly1305/chapolytest.c
 new file mode 100644
-index 0000000..276d0cc
+index 0000000..56e713e
 --- /dev/null
-+++ b/crypto/chacha20poly1305/chapoly_test.c
-@@ -0,0 +1,289 @@
++++ b/crypto/chacha20poly1305/chapolytest.c
+@@ -0,0 +1,287 @@
 +/* ====================================================================
 + * Copyright (c) 2011-2013 The OpenSSL Project.  All rights reserved.
 + *
@@ -3296,7 +3281,7 @@ index 0000000..276d0cc
 +		{
 +		unsigned char *key = misalign(key_bytes);
 +		unsigned char *nonce = misalign(nonce_bytes);
-+		
++
 +		printf("ChaCha20 test #%d\n", i);
 +		const struct chacha_test *test = &chacha_tests[i];
 +		unsigned char *expected, *out_bytes, *zero_bytes, *out, *zeros;
@@ -3374,7 +3359,7 @@ index 0000000..276d0cc
 +		hex_decode(expected, test->outhex);
 +
 +		in = malloc(inlen);
-+		
++
 +		hex_decode(in, test->inputhex);
 +
 +#ifdef CHAPOLY_x86_64_ASM
@@ -3412,14 +3397,12 @@ index 0000000..276d0cc
 +	printf("PASS\n");
 +	return 0;
 +	}
-+
-+
 diff --git a/crypto/chacha20poly1305/poly1305.c b/crypto/chacha20poly1305/poly1305.c
 new file mode 100644
-index 0000000..50bc4a0
+index 0000000..8b065cd
 --- /dev/null
 +++ b/crypto/chacha20poly1305/poly1305.c
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,285 @@
 +/* Copyright (c) 2014, Google Inc.
 + *
 + * Permission to use, copy, modify, and/or distribute this software for any
@@ -3438,11 +3421,10 @@ index 0000000..50bc4a0
 + * (https://github.com/floodyberry/poly1305-donna) and released as public
 + * domain. */
 +
-+#include "chacha20poly1305.h"
-+
++#include <openssl/chacha20poly1305.h>
 +#include <string.h>
 +
-+#if !defined(B_ENDIAN) 
++#if !defined(B_ENDIAN)
 +/* We can assume little-endian. */
 +static uint32_t U8TO32_LE(const uint8_t *m) {
 +  uint32_t r;
@@ -3706,18 +3688,16 @@ index 0000000..50bc4a0
 +  f3 += (f2 >> 32);
 +  U32TO8_LE(&mac[12], f3);
 +}
-+
 diff --git a/crypto/cryptlib.c b/crypto/cryptlib.c
-index 98526d7..62baa3a 100644
+index ca0e3cc..244c17e 100644
 --- a/crypto/cryptlib.c
 +++ b/crypto/cryptlib.c
-@@ -653,22 +653,11 @@ const char *CRYPTO_get_lock_name(int type)
-         defined(__x86_64) || defined(__x86_64__) || \
+@@ -654,19 +654,9 @@ const char *CRYPTO_get_lock_name(int type)
          defined(_M_AMD64) || defined(_M_X64)
  
--extern unsigned int OPENSSL_ia32cap_P[4];
-+unsigned int OPENSSL_ia32cap_P[4] = {0};
- unsigned long *OPENSSL_ia32cap_loc(void)
+ extern unsigned int OPENSSL_ia32cap_P[4];
+-unsigned long *OPENSSL_ia32cap_loc(void)
++unsigned int *OPENSSL_ia32cap_loc(void)
  {
 -    if (sizeof(long) == 4)
 -        /*
@@ -3730,33 +3710,25 @@ index 98526d7..62baa3a 100644
 -    OPENSSL_ia32cap_P[2] = 0;
 -
 -    return (unsigned long *)OPENSSL_ia32cap_P;
-+    return (unsigned long*)OPENSSL_ia32cap_P;
++    return OPENSSL_ia32cap_P;
  }
--
+ 
  # if defined(OPENSSL_CPUID_OBJ) && !defined(OPENSSL_NO_ASM) && !defined(I386_ONLY)
- #  define OPENSSL_CPUID_SETUP
- #  if defined(_WIN32)
-@@ -723,16 +712,13 @@ void OPENSSL_cpuid_setup(void)
-     OPENSSL_ia32cap_P[0] = (unsigned int)vec | (1 << 10);
-     OPENSSL_ia32cap_P[1] = (unsigned int)(vec >> 32);
- }
--# else
--unsigned int OPENSSL_ia32cap_P[4];
- # endif
--
--#else
-+# else
- unsigned long *OPENSSL_ia32cap_loc(void)
- {
-     return NULL;
- }
--#endif
-+# endif
- int OPENSSL_NONPIC_relocated = 0;
- #if !defined(OPENSSL_CPUID_SETUP) && !defined(OPENSSL_CPUID_OBJ)
- void OPENSSL_cpuid_setup(void)
+diff --git a/crypto/crypto.h b/crypto/crypto.h
+index c450d7a..aeacb00 100644
+--- a/crypto/crypto.h
++++ b/crypto/crypto.h
+@@ -590,7 +590,7 @@ void CRYPTO_mem_leaks_cb(CRYPTO_MEM_LEAK_CB *cb);
+ void OpenSSLDie(const char *file, int line, const char *assertion);
+ # define OPENSSL_assert(e)       (void)((e) ? 0 : (OpenSSLDie(__FILE__, __LINE__, #e),1))
+ 
+-unsigned long *OPENSSL_ia32cap_loc(void);
++unsigned int *OPENSSL_ia32cap_loc(void);
+ # define OPENSSL_ia32cap (*(OPENSSL_ia32cap_loc()))
+ int OPENSSL_isservice(void);
+ 
 diff --git a/crypto/evp/Makefile b/crypto/evp/Makefile
-index c9afca7..5c877f6 100644
+index aaaad98..e30b588 100644
 --- a/crypto/evp/Makefile
 +++ b/crypto/evp/Makefile
 @@ -29,7 +29,8 @@ LIBSRC= encode.c digest.c evp_enc.c evp_key.c evp_acnf.c evp_cnf.c \
@@ -3779,7 +3751,7 @@ index c9afca7..5c877f6 100644
  
  SRC= $(LIBSRC)
  
-@@ -261,6 +263,7 @@ e_cast.o: ../../include/openssl/objects.h ../../include/openssl/opensslconf.h
+@@ -263,6 +265,7 @@ e_cast.o: ../../include/openssl/objects.h ../../include/openssl/opensslconf.h
  e_cast.o: ../../include/openssl/opensslv.h ../../include/openssl/ossl_typ.h
  e_cast.o: ../../include/openssl/safestack.h ../../include/openssl/stack.h
  e_cast.o: ../../include/openssl/symhacks.h ../cryptlib.h e_cast.c evp_locl.h
@@ -3789,10 +3761,10 @@ index c9afca7..5c877f6 100644
  e_des.o: ../../include/openssl/des.h ../../include/openssl/des_old.h
 diff --git a/crypto/evp/e_chacha20poly1305.c b/crypto/evp/e_chacha20poly1305.c
 new file mode 100644
-index 0000000..0a1e16b
+index 0000000..0cb2af7
 --- /dev/null
 +++ b/crypto/evp/e_chacha20poly1305.c
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,323 @@
 +/* ====================================================================
 + * Copyright (c) 2001-2014 The OpenSSL Project.  All rights reserved.
 + *
@@ -3801,7 +3773,7 @@ index 0000000..0a1e16b
 + * are met:
 + *
 + * 1. Redistributions of source code must retain the above copyright
-+ *    notice, this list of conditions and the following disclaimer. 
++ *    notice, this list of conditions and the following disclaimer.
 + *
 + * 2. Redistributions in binary form must reproduce the above copyright
 + *    notice, this list of conditions and the following disclaimer in
@@ -3935,7 +3907,7 @@ index 0000000..0a1e16b
 +	aead_ctx->valid = 0;
 +	return 1;
 +	}
-+	
++
 +static int EVP_chacha20_poly1305_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out, const unsigned char *in, size_t inl)
 +	{
 +	EVP_CHACHA20_POLY1305_CTX *aead_ctx = ctx->cipher_data;
@@ -3943,6 +3915,8 @@ index 0000000..0a1e16b
 +	uint64_t cl;
 +	if(!aead_ctx->valid)
 +		return 0;
++	if (inl < 16)
++		return -1;
 +	/* Fix for MAC */
 +	inl -= 16;
 +	/* Encryption */
@@ -3987,7 +3961,7 @@ index 0000000..0a1e16b
 +		cl = aead_ctx->ct_l;
 +		poly_update(aead_ctx, (uint8_t*)&cl, sizeof(cl));
 +		poly_finish(aead_ctx, poly_block);
-+	
++
 +                uint64_t cmp = ((uint64_t*)poly_block)[0] ^ ((uint64_t*)(in + inl))[0];
 +                cmp |= ((uint64_t*)poly_block)[1] ^ ((uint64_t*)(in + inl))[1];
 +
@@ -4003,7 +3977,7 @@ index 0000000..0a1e16b
 +		}
 +	return 0;
 +	}
-+	
++
 +static int EVP_chacha20_poly1305_cleanup(EVP_CIPHER_CTX *ctx)
 +	{
 +	return 1;
@@ -4017,11 +3991,11 @@ index 0000000..0a1e16b
 +#endif
 +	uint8_t aad[13 + 8];
 +        uint64_t thirteen = 13;
-+	
++
 +	switch(type)
 +		{
 +		case EVP_CTRL_AEAD_TLS1_AAD:
-+			if(arg!=13) 
++			if(arg!=13)
 +				return 0;
 +			/* Initialize poly keys */
 +#ifndef FILL_BUFFER
@@ -4037,17 +4011,17 @@ index 0000000..0a1e16b
 +
 +#ifdef CHAPOLY_x86_64_ASM
 +			aead_ctx->poly_buffer_used = 0;
-+			if((OPENSSL_ia32cap_loc()[1] >> 5) & 1) /* AVX2 */
++			if((OPENSSL_ia32cap_loc()[2] >> 5) & 1) /* AVX2 */
 +				{
 +				aead_ctx->poly1305_init_ptr = poly1305_init_avx2;
 +				aead_ctx->poly1305_update_ptr = poly1305_update_avx2;
-+				aead_ctx->poly1305_finish_ptr = poly1305_finish_avx2;	
++				aead_ctx->poly1305_finish_ptr = poly1305_finish_avx2;
 +				}
-+			else if ((OPENSSL_ia32cap_loc()[0] >> 60) & 1) /* AVX */
++			else if ((OPENSSL_ia32cap_loc()[1] >> 28) & 1) /* AVX */
 +				{
 +				aead_ctx->poly1305_init_ptr = poly1305_init_avx;
 +				aead_ctx->poly1305_update_ptr = poly1305_update_avx;
-+				aead_ctx->poly1305_finish_ptr = poly1305_finish_avx;	
++				aead_ctx->poly1305_finish_ptr = poly1305_finish_avx;
 +				}
 +			else						/*C*/
 +				{
@@ -4089,14 +4063,14 @@ index 0000000..0a1e16b
 +		}
 +	return 0;
 +	}
-+	
++
 +#define CUSTOM_FLAGS	(\
 +		  EVP_CIPH_CUSTOM_IV | EVP_CIPH_FLAG_CUSTOM_CIPHER \
 +		| EVP_CIPH_ALWAYS_CALL_INIT  \
 +		| EVP_CIPH_CUSTOM_COPY)
-+		
++
 +static const EVP_CIPHER chacha20_poly1305 = {
-+	0,	/* nid ??? */
++	NID_chacha20_poly1305,	/* nid */
 +	1,	/* block size, sorta */
 +	32,	/* key len */
 +	0,	/* iv len */
@@ -4105,82 +4079,138 @@ index 0000000..0a1e16b
 +	EVP_chacha20_poly1305_cipher,
 +	EVP_chacha20_poly1305_cleanup,
 +	sizeof(EVP_CHACHA20_POLY1305_CTX), /* ctx size */
-+	NULL, NULL, 
++	NULL, NULL,
 +	EVP_chacha20_poly1305_ctrl,
 +	NULL
 +	};
-+	
++
 +const EVP_CIPHER *EVP_chacha20_poly1305(void)
 +{ return &chacha20_poly1305; }
 +
 +#endif
 diff --git a/crypto/evp/evp.h b/crypto/evp/evp.h
-index 47abbac..1f16e81 100644
+index 39ab793..5f2260a 100644
 --- a/crypto/evp/evp.h
 +++ b/crypto/evp/evp.h
-@@ -891,6 +891,7 @@ const EVP_CIPHER *EVP_camellia_256_cfb128(void);
+@@ -893,6 +893,9 @@ const EVP_CIPHER *EVP_camellia_256_cfb128(void);
  #  define EVP_camellia_256_cfb EVP_camellia_256_cfb128
  const EVP_CIPHER *EVP_camellia_256_ofb(void);
  # endif
++# ifndef OPENSSL_NO_CHACHA_POLY
 +const EVP_CIPHER *EVP_chacha20_poly1305(void);
++# endif
  
  # ifndef OPENSSL_NO_SEED
  const EVP_CIPHER *EVP_seed_ecb(void);
+diff --git a/crypto/objects/obj_dat.h b/crypto/objects/obj_dat.h
+index b7e3cf2..4059875 100644
+--- a/crypto/objects/obj_dat.h
++++ b/crypto/objects/obj_dat.h
+@@ -62,9 +62,9 @@
+  * [including the GNU Public Licence.]
+  */
+ 
+-#define NUM_NID 958
+-#define NUM_SN 951
+-#define NUM_LN 951
++#define NUM_NID 959
++#define NUM_SN 952
++#define NUM_LN 952
+ #define NUM_OBJ 890
+ 
+ static const unsigned char lvalues[6255]={
+@@ -2514,6 +2514,8 @@ static const ASN1_OBJECT nid_objs[NUM_NID]={
+ 	NID_jurisdictionStateOrProvinceName,11,&(lvalues[6232]),0},
+ {"jurisdictionC","jurisdictionCountryName",
+ 	NID_jurisdictionCountryName,11,&(lvalues[6243]),0},
++{"id-chacha20-poly1305","chacha20-poly1305",NID_chacha20_poly1305,0,
++	NULL,0},
+ };
+ 
+ static const unsigned int sn_objs[NUM_SN]={
+@@ -2954,6 +2956,7 @@ static const unsigned int sn_objs[NUM_SN]={
+ 362,	/* "id-cct-PKIResponse" */
+ 360,	/* "id-cct-crs" */
+ 81,	/* "id-ce" */
++958,	/* "id-chacha20-poly1305" */
+ 680,	/* "id-characteristic-two-basis" */
+ 263,	/* "id-cmc" */
+ 334,	/* "id-cmc-addExtensions" */
+@@ -3728,6 +3731,7 @@ static const unsigned int ln_objs[NUM_LN]={
+ 677,	/* "certicom-arc" */
+ 517,	/* "certificate extensions" */
+ 883,	/* "certificateRevocationList" */
++958,	/* "chacha20-poly1305" */
+ 54,	/* "challengePassword" */
+ 407,	/* "characteristic-two-field" */
+ 395,	/* "clearance" */
+diff --git a/crypto/objects/obj_mac.h b/crypto/objects/obj_mac.h
+index 779c309..2a34635 100644
+--- a/crypto/objects/obj_mac.h
++++ b/crypto/objects/obj_mac.h
+@@ -4192,3 +4192,7 @@
+ #define LN_jurisdictionCountryName              "jurisdictionCountryName"
+ #define NID_jurisdictionCountryName             957
+ #define OBJ_jurisdictionCountryName             1L,3L,6L,1L,4L,1L,311L,60L,2L,1L,3L
++
++#define SN_chacha20_poly1305    "id-chacha20-poly1305"
++#define LN_chacha20_poly1305    "chacha20-poly1305"
++#define NID_chacha20_poly1305   958
 diff --git a/ssl/s3_lib.c b/ssl/s3_lib.c
-index 28129f6..5fd5633 100644
+index ad9eeb6..a654176 100644
 --- a/ssl/s3_lib.c
 +++ b/ssl/s3_lib.c
 @@ -2891,6 +2891,53 @@ OPENSSL_GLOBAL SSL_CIPHER ssl3_ciphers[] = {
       256},
  #endif
  
++    /* Chacha20-Poly1305 draft cipher suites */
 +#if !defined(OPENSSL_NO_CHACHA_POLY)
-+	{
-+	1,
-+	TLS1_TXT_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-+	TLS1_CK_ECDHE_RSA_CHACHA20_POLY1305,
-+	SSL_kEECDH,
-+	SSL_aRSA,
-+	SSL_CHACHA20POLY1305,
-+	SSL_AEAD,
-+	SSL_TLSV1_2,
-+	SSL_NOT_EXP|SSL_HIGH,
-+	SSL_HANDSHAKE_MAC_SHA256|TLS1_PRF_SHA256,
-+	256,
-+	0,
-+	},
++    {
++     1,
++     TLS1_TXT_ECDHE_RSA_WITH_CHACHA20_POLY1305,
++     TLS1_CK_ECDHE_RSA_CHACHA20_POLY1305,
++     SSL_kEECDH,
++     SSL_aRSA,
++     SSL_CHACHA20POLY1305,
++     SSL_AEAD,
++     SSL_TLSV1_2,
++     SSL_NOT_EXP|SSL_HIGH,
++     SSL_HANDSHAKE_MAC_SHA256|TLS1_PRF_SHA256,
++     256,
++     0,
++    },
 +
-+	{
-+	1,
-+	TLS1_TXT_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-+	TLS1_CK_ECDHE_ECDSA_CHACHA20_POLY1305,
-+	SSL_kEECDH,
-+	SSL_aECDSA,
-+	SSL_CHACHA20POLY1305,
-+	SSL_AEAD,
-+	SSL_TLSV1_2,
-+	SSL_NOT_EXP|SSL_HIGH,
-+	SSL_HANDSHAKE_MAC_SHA256|TLS1_PRF_SHA256,
-+	256,
-+	0,
-+	},
++    {
++     1,
++     TLS1_TXT_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
++     TLS1_CK_ECDHE_ECDSA_CHACHA20_POLY1305,
++     SSL_kEECDH,
++     SSL_aECDSA,
++     SSL_CHACHA20POLY1305,
++     SSL_AEAD,
++     SSL_TLSV1_2,
++     SSL_NOT_EXP|SSL_HIGH,
++     SSL_HANDSHAKE_MAC_SHA256|TLS1_PRF_SHA256,
++     256,
++     0,
++    },
 +
-+	{
-+	1,
-+	TLS1_TXT_DHE_RSA_WITH_CHACHA20_POLY1305,
-+	TLS1_CK_DHE_RSA_CHACHA20_POLY1305,
-+	SSL_kEDH,
-+	SSL_aRSA,
-+	SSL_CHACHA20POLY1305,
-+	SSL_AEAD,
-+	SSL_TLSV1_2,
-+	SSL_NOT_EXP|SSL_HIGH,
-+	SSL_HANDSHAKE_MAC_SHA256|TLS1_PRF_SHA256,
-+	256,
-+	0,
-+	},
++    {
++     1,
++     TLS1_TXT_DHE_RSA_WITH_CHACHA20_POLY1305,
++     TLS1_CK_DHE_RSA_CHACHA20_POLY1305,
++     SSL_kEDH,
++     SSL_aRSA,
++     SSL_CHACHA20POLY1305,
++     SSL_AEAD,
++     SSL_TLSV1_2,
++     SSL_NOT_EXP|SSL_HIGH,
++     SSL_HANDSHAKE_MAC_SHA256|TLS1_PRF_SHA256,
++     256,
++     0,
++    },
 +#endif
-+
  /* end of list */
  };
  
@@ -4196,7 +4226,7 @@ index 28129f6..5fd5633 100644
      if (s->options & SSL_OP_CIPHER_SERVER_PREFERENCE || tls1_suiteb(s)) {
          prio = srvr;
          allow = clnt;
-+        /* Use ChaCha20+Poly1305 iff it's client's most preferred cipher suite */
++       /* Use ChaCha20+Poly1305 iff it's client's most preferred cipher suite */
 +        if (sk_SSL_CIPHER_num(clnt) > 0) {
 +            c = sk_SSL_CIPHER_value(clnt, 0);
 +            if (c->algorithm_enc == SSL_CHACHA20POLY1305)
@@ -4204,31 +4234,26 @@ index 28129f6..5fd5633 100644
 +        }
      } else {
          prio = clnt;
-         allow = srvr;
+-        allow = srvr;
++        allow = srvr;
 +        use_chacha = 1;
      }
  
      tls1_set_cert_validity(s);
-@@ -4093,12 +4148,17 @@ SSL_CIPHER *ssl3_choose_cipher(SSL *s, STACK_OF(SSL_CIPHER) *clnt,
-         /* Skip TLS v1.2 only ciphersuites if not supported */
+@@ -4094,6 +4149,11 @@ SSL_CIPHER *ssl3_choose_cipher(SSL *s, STACK_OF(SSL_CIPHER) *clnt,
          if ((c->algorithm_ssl & SSL_TLSV1_2) && !SSL_USE_TLS1_2_CIPHERS(s))
              continue;
+ 
 +        /* Skip ChaCha unless top client priority */
 +        if ((c->algorithm_enc == SSL_CHACHA20POLY1305) &&
 +            !use_chacha)
 +            continue;
- 
++
          ssl_set_cert_masks(cert, c);
          mask_k = cert->mask_k;
          mask_a = cert->mask_a;
-         emask_k = cert->export_mask_k;
-         emask_a = cert->export_mask_a;
-+
- #ifndef OPENSSL_NO_SRP
-         if (s->srp_ctx.srp_Mask & SSL_kSRP) {
-             mask_k |= SSL_kSRP;
 diff --git a/ssl/ssl.h b/ssl/ssl.h
-index 2b0f662..af660bc 100644
+index c6c5bce..6367a52 100644
 --- a/ssl/ssl.h
 +++ b/ssl/ssl.h
 @@ -297,6 +297,7 @@ extern "C" {
@@ -4239,8 +4264,23 @@ index 2b0f662..af660bc 100644
  
  # define SSL_TXT_MD5             "MD5"
  # define SSL_TXT_SHA1            "SHA1"
+diff --git a/ssl/ssl_algs.c b/ssl/ssl_algs.c
+index e6f515f..4eff5ea 100644
+--- a/ssl/ssl_algs.c
++++ b/ssl/ssl_algs.c
+@@ -105,6 +105,10 @@ int SSL_library_init(void)
+     EVP_add_cipher(EVP_camellia_128_cbc());
+     EVP_add_cipher(EVP_camellia_256_cbc());
+ #endif
++
++#ifndef OPENSSL_NO_CHACHA_POLY
++    EVP_add_cipher(EVP_chacha20_poly1305());
++#endif
+ 
+ #ifndef OPENSSL_NO_SEED
+     EVP_add_cipher(EVP_seed_cbc());
 diff --git a/ssl/ssl_ciph.c b/ssl/ssl_ciph.c
-index b038c55..e99ce49 100644
+index a53f25b..e25db6d 100644
 --- a/ssl/ssl_ciph.c
 +++ b/ssl/ssl_ciph.c
 @@ -164,7 +164,8 @@
@@ -4248,8 +4288,8 @@ index b038c55..e99ce49 100644
  #define SSL_ENC_AES128GCM_IDX   12
  #define SSL_ENC_AES256GCM_IDX   13
 -#define SSL_ENC_NUM_IDX         14
-+#define SSL_ENC_CHACHA20POLY1305_IDX	14
-+#define SSL_ENC_NUM_IDX		15
++#define SSL_ENC_CHACHA20POLY1305_IDX  14
++#define SSL_ENC_NUM_IDX               15
  
  static const EVP_CIPHER *ssl_cipher_methods[SSL_ENC_NUM_IDX] = {
      NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -4265,8 +4305,8 @@ index b038c55..e99ce49 100644
      ssl_cipher_methods[SSL_ENC_AES256GCM_IDX] =
          EVP_get_cipherbyname(SN_aes_256_gcm);
  
-+    ssl_cipher_methods[SSL_ENC_CHACHA20POLY1305_IDX]=
-+        EVP_chacha20_poly1305();
++    ssl_cipher_methods[SSL_ENC_CHACHA20POLY1305_IDX] =
++        EVP_get_cipherbyname(SN_chacha20_poly1305);
 +
      ssl_digest_methods[SSL_MD_MD5_IDX] = EVP_get_digestbyname(SN_md5);
      ssl_mac_secret_size[SSL_MD_MD5_IDX] =
@@ -4276,41 +4316,32 @@ index b038c55..e99ce49 100644
          i = SSL_ENC_AES256GCM_IDX;
          break;
 +    case SSL_CHACHA20POLY1305:
-+        i=SSL_ENC_CHACHA20POLY1305_IDX;
++        i = SSL_ENC_CHACHA20POLY1305_IDX;
 +        break;
      default:
          i = -1;
          break;
-@@ -779,7 +787,6 @@ static void ssl_cipher_get_disabled(unsigned long *mkey, unsigned long *auth,
- #ifdef SSL_FORBID_ENULL
-     *enc |= SSL_eNULL;
- #endif
--
-     *enc |= (ssl_cipher_methods[SSL_ENC_DES_IDX] == NULL) ? SSL_DES : 0;
-     *enc |= (ssl_cipher_methods[SSL_ENC_3DES_IDX] == NULL) ? SSL_3DES : 0;
-     *enc |= (ssl_cipher_methods[SSL_ENC_RC4_IDX] == NULL) ? SSL_RC4 : 0;
-@@ -793,6 +800,9 @@ static void ssl_cipher_get_disabled(unsigned long *mkey, unsigned long *auth,
-     *enc |=
-         (ssl_cipher_methods[SSL_ENC_AES256GCM_IDX] ==
-          NULL) ? SSL_AES256GCM : 0;
-+    *enc |= 
-+        (ssl_cipher_methods[SSL_ENC_CHACHA20POLY1305_IDX] 
-+         == NULL) ? SSL_CHACHA20POLY1305:0;
-     *enc |=
-         (ssl_cipher_methods[SSL_ENC_CAMELLIA128_IDX] ==
-          NULL) ? SSL_CAMELLIA128 : 0;
-@@ -1802,6 +1812,9 @@ char *SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
-     case SSL_AES256GCM:
-         enc = "AESGCM(256)";
+@@ -803,6 +811,8 @@ static void ssl_cipher_get_disabled(unsigned long *mkey, unsigned long *auth,
+         (ssl_cipher_methods[SSL_ENC_GOST89_IDX] ==
+          NULL) ? SSL_eGOST2814789CNT : 0;
+     *enc |= (ssl_cipher_methods[SSL_ENC_SEED_IDX] == NULL) ? SSL_SEED : 0;
++    *enc |= (ssl_cipher_methods[SSL_ENC_CHACHA20POLY1305_IDX] ==
++         NULL) ? SSL_CHACHA20POLY1305 : 0;
+ 
+     *mac |= (ssl_digest_methods[SSL_MD_MD5_IDX] == NULL) ? SSL_MD5 : 0;
+     *mac |= (ssl_digest_methods[SSL_MD_SHA1_IDX] == NULL) ? SSL_SHA1 : 0;
+@@ -1821,6 +1831,9 @@ char *SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
+     case SSL_eGOST2814789CNT:
+         enc = "GOST89(256)";
          break;
 +    case SSL_CHACHA20POLY1305:
-+        enc="ChaCha20-Poly1305";
++        enc = "CHACHA20-POLY1305(256)";
 +        break;
-     case SSL_CAMELLIA128:
-         enc = "Camellia(128)";
+     default:
+         enc = "unknown";
          break;
 diff --git a/ssl/ssl_locl.h b/ssl/ssl_locl.h
-index 46ea18a..6f99ce7 100644
+index 6c2c551..9e1cce3 100644
 --- a/ssl/ssl_locl.h
 +++ b/ssl/ssl_locl.h
 @@ -354,6 +354,7 @@
@@ -4322,10 +4353,10 @@ index 46ea18a..6f99ce7 100644
  # define SSL_AES                 (SSL_AES128|SSL_AES256|SSL_AES128GCM|SSL_AES256GCM)
  # define SSL_CAMELLIA            (SSL_CAMELLIA128|SSL_CAMELLIA256)
 diff --git a/ssl/tls1.h b/ssl/tls1.h
-index 5929607..74f9607 100644
+index 5929607..3a1ff70 100644
 --- a/ssl/tls1.h
 +++ b/ssl/tls1.h
-@@ -566,6 +566,10 @@ SSL_CTX_callback_ctrl(ssl,SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB,(void (*)(void))cb)
+@@ -566,6 +566,11 @@ SSL_CTX_callback_ctrl(ssl,SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB,(void (*)(void))cb)
  # define TLS1_CK_ECDH_RSA_WITH_AES_128_GCM_SHA256        0x0300C031
  # define TLS1_CK_ECDH_RSA_WITH_AES_256_GCM_SHA384        0x0300C032
  
@@ -4333,98 +4364,99 @@ index 5929607..74f9607 100644
 +# define TLS1_CK_ECDHE_RSA_CHACHA20_POLY1305             0x0300CC13
 +# define TLS1_CK_ECDHE_ECDSA_CHACHA20_POLY1305           0x0300CC14
 +# define TLS1_CK_DHE_RSA_CHACHA20_POLY1305               0x0300CC15
++
  /*
   * XXX * Backward compatibility alert: + * Older versions of OpenSSL gave
   * some DHE ciphers names with "EDH" + * instead of "DHE".  Going forward, we
-@@ -716,6 +720,11 @@ SSL_CTX_callback_ctrl(ssl,SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB,(void (*)(void))cb)
+@@ -716,6 +721,11 @@ SSL_CTX_callback_ctrl(ssl,SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB,(void (*)(void))cb)
  # define TLS1_TXT_ECDH_RSA_WITH_AES_128_GCM_SHA256       "ECDH-RSA-AES128-GCM-SHA256"
  # define TLS1_TXT_ECDH_RSA_WITH_AES_256_GCM_SHA384       "ECDH-RSA-AES256-GCM-SHA384"
  
 +/* ChaCha20-Poly1305 ciphersuites draft-agl-tls-chacha20poly1305-01 */
-+#define TLS1_TXT_ECDHE_RSA_WITH_CHACHA20_POLY1305       "ECDHE-RSA-CHACHA20-POLY1305"
-+#define TLS1_TXT_ECDHE_ECDSA_WITH_CHACHA20_POLY1305     "ECDHE-ECDSA-CHACHA20-POLY1305"
-+#define TLS1_TXT_DHE_RSA_WITH_CHACHA20_POLY1305         "DHE-RSA-CHACHA20-POLY1305"
++#define TLS1_TXT_ECDHE_RSA_WITH_CHACHA20_POLY1305        "ECDHE-RSA-CHACHA20-POLY1305"
++#define TLS1_TXT_ECDHE_ECDSA_WITH_CHACHA20_POLY1305      "ECDHE-ECDSA-CHACHA20-POLY1305"
++#define TLS1_TXT_DHE_RSA_WITH_CHACHA20_POLY1305          "DHE-RSA-CHACHA20-POLY1305"
 +
  # define TLS_CT_RSA_SIGN                 1
  # define TLS_CT_DSS_SIGN                 2
  # define TLS_CT_RSA_FIXED_DH             3
 diff --git a/test/Makefile b/test/Makefile
-index 3388679..eacccca 100644
+index 80aeccf..bce42c5 100644
 --- a/test/Makefile
 +++ b/test/Makefile
-@@ -68,6 +68,7 @@ V3NAMETEST=	v3nametest
- ASN1TEST=	asn1test
- HEARTBEATTEST=  heartbeat_test
+@@ -70,6 +70,7 @@ HEARTBEATTEST=  heartbeat_test
  CONSTTIMETEST=  constant_time_test
-+CHAPOLYTEST=	chapoly_test
+ VERIFYEXTRATEST=	verify_extra_test
+ CLIENTHELLOTEST=	clienthellotest
++CHAPOLYTEST=	chapolytest
  
  TESTS=		alltests
  
-@@ -80,7 +81,8 @@ EXE=	$(BNTEST)$(EXE_EXT) $(ECTEST)$(EXE_EXT)  $(ECDSATEST)$(EXE_EXT) $(ECDHTEST)
- 	$(BFTEST)$(EXE_EXT) $(CASTTEST)$(EXE_EXT) $(SSLTEST)$(EXE_EXT) $(EXPTEST)$(EXE_EXT) $(DSATEST)$(EXE_EXT) $(RSATEST)$(EXE_EXT) \
+@@ -83,7 +84,7 @@ EXE=	$(BNTEST)$(EXE_EXT) $(ECTEST)$(EXE_EXT)  $(ECDSATEST)$(EXE_EXT) $(ECDHTEST)
  	$(EVPTEST)$(EXE_EXT) $(EVPEXTRATEST)$(EXE_EXT) $(IGETEST)$(EXE_EXT) $(JPAKETEST)$(EXE_EXT) $(SRPTEST)$(EXE_EXT) \
  	$(ASN1TEST)$(EXE_EXT) $(V3NAMETEST)$(EXE_EXT) $(HEARTBEATTEST)$(EXE_EXT) \
--	$(CONSTTIMETEST)$(EXE_EXT)
-+	$(CONSTTIMETEST)$(EXE_EXT) \
-+	$(CHAPOLYTEST)$(EXE_EXT)
+ 	$(CONSTTIMETEST)$(EXE_EXT) $(VERIFYEXTRATEST)$(EXE_EXT) \
+-	$(CLIENTHELLOTEST)$(EXE_EXT)
++	$(CLIENTHELLOTEST)$(EXE_EXT) $(CHAPOLYTEST)$(EXE_EXT)
  
  # $(METHTEST)$(EXE_EXT)
  
-@@ -93,7 +95,8 @@ OBJ=	$(BNTEST).o $(ECTEST).o  $(ECDSATEST).o $(ECDHTEST).o $(IDEATEST).o \
- 	$(RANDTEST).o $(DHTEST).o $(ENGINETEST).o $(CASTTEST).o \
+@@ -97,7 +98,7 @@ OBJ=	$(BNTEST).o $(ECTEST).o  $(ECDSATEST).o $(ECDHTEST).o $(IDEATEST).o \
  	$(BFTEST).o  $(SSLTEST).o  $(DSATEST).o  $(EXPTEST).o $(RSATEST).o \
  	$(EVPTEST).o $(EVPEXTRATEST).o $(IGETEST).o $(JPAKETEST).o $(ASN1TEST).o $(V3NAMETEST).o \
--	$(HEARTBEATTEST).o $(CONSTTIMETEST).o
-+	$(HEARTBEATTEST).o $(CONSTTIMETEST).o \
-+	$(CHAPOLYTEST).o
+ 	$(HEARTBEATTEST).o $(CONSTTIMETEST).o $(VERIFYEXTRATEST).o \
+-	$(CLIENTHELLOTEST).o
++	$(CLIENTHELLOTEST).o $(CHAPOLYTEST).o
  
  SRC=	$(BNTEST).c $(ECTEST).c  $(ECDSATEST).c $(ECDHTEST).c $(IDEATEST).c \
  	$(MD2TEST).c  $(MD4TEST).c $(MD5TEST).c \
-@@ -103,7 +106,8 @@ SRC=	$(BNTEST).c $(ECTEST).c  $(ECDSATEST).c $(ECDHTEST).c $(IDEATEST).c \
- 	$(RANDTEST).c $(DHTEST).c $(ENGINETEST).c $(CASTTEST).c \
+@@ -108,7 +109,7 @@ SRC=	$(BNTEST).c $(ECTEST).c  $(ECDSATEST).c $(ECDHTEST).c $(IDEATEST).c \
  	$(BFTEST).c  $(SSLTEST).c $(DSATEST).c   $(EXPTEST).c $(RSATEST).c \
  	$(EVPTEST).c $(EVPEXTRATEST).c $(IGETEST).c $(JPAKETEST).c $(SRPTEST).c $(ASN1TEST).c \
--	$(V3NAMETEST).c $(HEARTBEATTEST).c $(CONSTTIMETEST).c
-+	$(V3NAMETEST).c $(HEARTBEATTEST).c $(CONSTTIMETEST).c \
-+	$(CHAPOLYTEST).c
+ 	$(V3NAMETEST).c $(HEARTBEATTEST).c $(CONSTTIMETEST).c $(VERIFYEXTRATEST).c \
+-	$(CLIENTHELLOTEST).c
++	$(CLIENTHELLOTEST).c $(CHAPOLYTEST).c
  
  EXHEADER= 
  HEADER=	testutil.h $(EXHEADER)
-@@ -139,6 +143,7 @@ apps:
+@@ -144,7 +145,7 @@ apps:
  	@(cd ..; $(MAKE) DIRS=apps all)
  
  alltests: \
-+	test_chapoly \
- 	test_des test_idea test_sha test_md4 test_md5 test_hmac \
+-	test_des test_idea test_sha test_md4 test_md5 test_hmac \
++	test_des test_idea test_sha test_md4 test_md5 test_hmac test_chapoly \
  	test_md2 test_mdc2 test_wp \
  	test_rmd test_rc2 test_rc4 test_rc5 test_bf test_cast test_aes \
-@@ -348,6 +353,9 @@ test_constant_time: $(CONSTTIMETEST)$(EXE_EXT)
- 	@echo "Test constant time utilites"
- 	../util/shlib_wrap.sh ./$(CONSTTIMETEST)
+ 	test_rand test_bn test_ec test_ecdsa test_ecdh \
+@@ -361,6 +362,10 @@ test_clienthello: $(CLIENTHELLOTEST)$(EXE_EXT)
+ 	@echo $(START) $@
+ 	../util/shlib_wrap.sh ./$(CLIENTHELLOTEST)
  
 +test_chapoly: $(CHAPOLYTEST)$(EXE_EXT)
 +	@echo "Test ChaCha20 and Poly1305"
 +	../util/shlib_wrap.sh ./$(CHAPOLYTEST)
++
  lint:
  	lint -DLINT $(INCLUDES) $(SRC)>fluff
  
-@@ -516,7 +524,10 @@ $(HEARTBEATTEST)$(EXE_EXT): $(HEARTBEATTEST).o $(DLIBCRYPTO)
- 	@target=$(HEARTBEATTEST); $(BUILD_CMD_STATIC)
+@@ -538,6 +543,9 @@ $(VERIFYEXTRATEST)$(EXE_EXT): $(VERIFYEXTRATEST).o
+ $(CLIENTHELLOTEST)$(EXE_EXT): $(CLIENTHELLOTEST).o
+ 	@target=$(CLIENTHELLOTEST) $(BUILD_CMD)
  
- $(CONSTTIMETEST)$(EXE_EXT): $(CONSTTIMETEST).o
--	@target=$(CONSTTIMETEST) $(BUILD_CMD)
-+	@target=$(CONSTTIMETEST); $(BUILD_CMD)
-+
 +$(CHAPOLYTEST)$(EXE_EXT): $(CHAPOLYTEST).o
 +	@target=$(CHAPOLYTEST); $(BUILD_CMD)
- 
++
  #$(AESTEST).o: $(AESTEST).c
  #	$(CC) -c $(CFLAGS) -DINTERMEDIATE_VALUE_KAT -DTRACE_KAT_MCT $(AESTEST).c
-@@ -826,3 +837,4 @@ wp_test.o: ../include/openssl/opensslconf.h ../include/openssl/opensslv.h
- wp_test.o: ../include/openssl/ossl_typ.h ../include/openssl/safestack.h
- wp_test.o: ../include/openssl/stack.h ../include/openssl/symhacks.h
- wp_test.o: ../include/openssl/whrlpool.h wp_test.c
-+chapoly_test.o: ../include/openssl/chacha20poly1305.h chapoly_test.c
+ 
+@@ -605,6 +613,7 @@ clienthellotest.o: clienthellotest.c
+ constant_time_test.o: ../crypto/constant_time_locl.h ../e_os.h
+ constant_time_test.o: ../include/openssl/e_os2.h
+ constant_time_test.o: ../include/openssl/opensslconf.h constant_time_test.c
++chapolytest.o: ../include/openssl/chacha20poly1305.h chapolytest.c
+ destest.o: ../include/openssl/des.h ../include/openssl/des_old.h
+ destest.o: ../include/openssl/e_os2.h ../include/openssl/opensslconf.h
+ destest.o: ../include/openssl/ossl_typ.h ../include/openssl/safestack.h
 -- 
-2.1.4
+1.9.1
 

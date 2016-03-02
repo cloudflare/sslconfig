@@ -5149,42 +5149,42 @@ diff --git a/test/Makefile b/test/Makefile
 index b180971..554d536 100644
 --- a/test/Makefile
 +++ b/test/Makefile
-@@ -70,6 +70,7 @@ HEARTBEATTEST=  heartbeat_test
- CONSTTIMETEST=  constant_time_test
+@@ -71,6 +71,7 @@
  VERIFYEXTRATEST=	verify_extra_test
  CLIENTHELLOTEST=	clienthellotest
+ SSLV2CONFTEST = 	sslv2conftest
 +CHAPOLYTEST=	chapolytest
  
  TESTS=		alltests
  
-@@ -83,7 +84,7 @@ EXE=	$(BNTEST)$(EXE_EXT) $(ECTEST)$(EXE_EXT)  $(ECDSATEST)$(EXE_EXT) $(ECDHTEST)
+@@ -84,7 +85,7 @@
  	$(EVPTEST)$(EXE_EXT) $(EVPEXTRATEST)$(EXE_EXT) $(IGETEST)$(EXE_EXT) $(JPAKETEST)$(EXE_EXT) $(SRPTEST)$(EXE_EXT) \
  	$(ASN1TEST)$(EXE_EXT) $(V3NAMETEST)$(EXE_EXT) $(HEARTBEATTEST)$(EXE_EXT) \
  	$(CONSTTIMETEST)$(EXE_EXT) $(VERIFYEXTRATEST)$(EXE_EXT) \
--	$(CLIENTHELLOTEST)$(EXE_EXT)
-+	$(CLIENTHELLOTEST)$(EXE_EXT) $(CHAPOLYTEST)$(EXE_EXT)
+-	$(CLIENTHELLOTEST)$(EXE_EXT) $(SSLV2CONFTEST)$(EXE_EXT)
++	$(CLIENTHELLOTEST)$(EXE_EXT) $(SSLV2CONFTEST)$(EXE_EXT) $(CHAPOLYTEST)$(EXE_EXT)
  
  # $(METHTEST)$(EXE_EXT)
  
-@@ -97,7 +98,7 @@ OBJ=	$(BNTEST).o $(ECTEST).o  $(ECDSATEST).o $(ECDHTEST).o $(IDEATEST).o \
+@@ -98,7 +99,7 @@
  	$(BFTEST).o  $(SSLTEST).o  $(DSATEST).o  $(EXPTEST).o $(RSATEST).o \
  	$(EVPTEST).o $(EVPEXTRATEST).o $(IGETEST).o $(JPAKETEST).o $(ASN1TEST).o $(V3NAMETEST).o \
  	$(HEARTBEATTEST).o $(CONSTTIMETEST).o $(VERIFYEXTRATEST).o \
--	$(CLIENTHELLOTEST).o
-+	$(CLIENTHELLOTEST).o $(CHAPOLYTEST).o
+-	$(CLIENTHELLOTEST).o  $(SSLV2CONFTEST).o
++	$(CLIENTHELLOTEST).o  $(SSLV2CONFTEST).o $(CHAPOLYTEST).o
  
  SRC=	$(BNTEST).c $(ECTEST).c  $(ECDSATEST).c $(ECDHTEST).c $(IDEATEST).c \
  	$(MD2TEST).c  $(MD4TEST).c $(MD5TEST).c \
-@@ -108,7 +109,7 @@ SRC=	$(BNTEST).c $(ECTEST).c  $(ECDSATEST).c $(ECDHTEST).c $(IDEATEST).c \
+@@ -109,7 +110,7 @@
  	$(BFTEST).c  $(SSLTEST).c $(DSATEST).c   $(EXPTEST).c $(RSATEST).c \
  	$(EVPTEST).c $(EVPEXTRATEST).c $(IGETEST).c $(JPAKETEST).c $(SRPTEST).c $(ASN1TEST).c \
  	$(V3NAMETEST).c $(HEARTBEATTEST).c $(CONSTTIMETEST).c $(VERIFYEXTRATEST).c \
--	$(CLIENTHELLOTEST).c
-+	$(CLIENTHELLOTEST).c $(CHAPOLYTEST).c
+-	$(CLIENTHELLOTEST).c  $(SSLV2CONFTEST).c
++	$(CLIENTHELLOTEST).c  $(SSLV2CONFTEST).c $(CHAPOLYTEST).c
  
  EXHEADER= 
  HEADER=	testutil.h $(EXHEADER)
-@@ -144,7 +145,7 @@ apps:
+@@ -145,7 +146,7 @@
  	@(cd ..; $(MAKE) DIRS=apps all)
  
  alltests: \
@@ -5193,9 +5193,9 @@ index b180971..554d536 100644
  	test_md2 test_mdc2 test_wp \
  	test_rmd test_rc2 test_rc4 test_rc5 test_bf test_cast test_aes \
  	test_rand test_bn test_ec test_ecdsa test_ecdh \
-@@ -361,6 +362,10 @@ test_clienthello: $(CLIENTHELLOTEST)$(EXE_EXT)
+@@ -366,6 +367,10 @@
  	@echo $(START) $@
- 	../util/shlib_wrap.sh ./$(CLIENTHELLOTEST)
+ 	../util/shlib_wrap.sh ./$(SSLV2CONFTEST)
  
 +test_chapoly: $(CHAPOLYTEST)$(EXE_EXT)
 +	@echo "Test ChaCha20 and Poly1305"
@@ -5204,9 +5204,9 @@ index b180971..554d536 100644
  lint:
  	lint -DLINT $(INCLUDES) $(SRC)>fluff
  
-@@ -538,6 +543,9 @@ $(VERIFYEXTRATEST)$(EXE_EXT): $(VERIFYEXTRATEST).o
- $(CLIENTHELLOTEST)$(EXE_EXT): $(CLIENTHELLOTEST).o
- 	@target=$(CLIENTHELLOTEST) $(BUILD_CMD)
+@@ -546,6 +551,9 @@
+ $(SSLV2CONFTEST)$(EXE_EXT): $(SSLV2CONFTEST).o
+ 	@target=$(SSLV2CONFTEST) $(BUILD_CMD)
  
 +$(CHAPOLYTEST)$(EXE_EXT): $(CHAPOLYTEST).o
 +	@target=$(CHAPOLYTEST); $(BUILD_CMD)
@@ -5214,7 +5214,7 @@ index b180971..554d536 100644
  #$(AESTEST).o: $(AESTEST).c
  #	$(CC) -c $(CFLAGS) -DINTERMEDIATE_VALUE_KAT -DTRACE_KAT_MCT $(AESTEST).c
  
-@@ -606,6 +614,7 @@ clienthellotest.o: clienthellotest.c
+@@ -614,6 +622,7 @@
  constant_time_test.o: ../crypto/constant_time_locl.h ../e_os.h
  constant_time_test.o: ../include/openssl/e_os2.h
  constant_time_test.o: ../include/openssl/opensslconf.h constant_time_test.c

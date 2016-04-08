@@ -1,37 +1,46 @@
-From eddaccf5acbf88ab57718292b10a059670571f27 Mon Sep 17 00:00:00 2001
+From 50e8323a9ffc8be8b2f759dac8ddc47eb2a38451 Mon Sep 17 00:00:00 2001
 From: Vlad Krasnov <vlad@cloudflare.com>
 Date: Mon, 4 Apr 2016 11:32:22 -0700
 Subject: [PATCH] Implementation of draft and RFC versions of CHACHA20-POLY1305
 
+Add RFC open() AVX2/SSE4, on HSW 15%/18% faster on average than OpenSSL
+
+Still need SSE4 seal, and convert to perlasm before can be merged with main
 ---
  Configure                                       |   48 +-
  Makefile.org                                    |    4 +-
  apps/speed.c                                    |   30 +-
- crypto/chacha20poly1305/Makefile                |  108 +++
- crypto/chacha20poly1305/asm/chacha20_avx.pl     |  408 +++++++++
- crypto/chacha20poly1305/asm/chacha20_avx2.pl    |  443 ++++++++++
- crypto/chacha20poly1305/asm/chapoly_seal_avx2.s | 1035 +++++++++++++++++++++++
- crypto/chacha20poly1305/asm/poly1305_avx.pl     |  732 ++++++++++++++++
- crypto/chacha20poly1305/asm/poly1305_avx2.pl    |  984 +++++++++++++++++++++
- crypto/chacha20poly1305/asm/poly1305_x64.pl     |  281 ++++++
- crypto/chacha20poly1305/chacha20.c              |  162 ++++
- crypto/chacha20poly1305/chacha20poly1305.h      |   82 ++
- crypto/chacha20poly1305/chapolytest.c           |  511 +++++++++++
- crypto/chacha20poly1305/poly1305.c              |  287 +++++++
+ crypto/chacha20poly1305/Makefile                |  112 ++
+ crypto/chacha20poly1305/asm/chacha20_avx.pl     |  408 ++++++++
+ crypto/chacha20poly1305/asm/chacha20_avx2.pl    |  443 ++++++++
+ crypto/chacha20poly1305/asm/chapoly_open.s      | 1067 +++++++++++++++++++
+ crypto/chacha20poly1305/asm/chapoly_open_avx2.s | 1262 +++++++++++++++++++++++
+ crypto/chacha20poly1305/asm/chapoly_seal_avx2.s | 1057 +++++++++++++++++++
+ crypto/chacha20poly1305/asm/poly1305_avx.pl     |  732 +++++++++++++
+ crypto/chacha20poly1305/asm/poly1305_avx2.pl    |  984 ++++++++++++++++++
+ crypto/chacha20poly1305/asm/poly1305_x64.pl     |  281 +++++
+ crypto/chacha20poly1305/chacha20.c              |  162 +++
+ crypto/chacha20poly1305/chacha20poly1305.h      |   86 ++
+ crypto/chacha20poly1305/chapolytest.c           |  511 +++++++++
+ crypto/chacha20poly1305/poly1305.c              |  287 ++++++
  crypto/cryptlib.c                               |   10 -
  crypto/evp/Makefile                             |   21 +-
- crypto/evp/e_chacha20poly1305.c                 |  452 ++++++++++
+ crypto/evp/c_allc.c                             |    3 +
+ crypto/evp/e_chacha20poly1305.c                 |  484 +++++++++
  crypto/evp/evp.h                                |    4 +
  ssl/s3_lib.c                                    |  119 +++
  ssl/ssl.h                                       |    2 +
+ ssl/ssl_algs.c                                  |    2 +
  ssl/ssl_ciph.c                                  |   60 +-
  ssl/ssl_locl.h                                  |    2 +
  ssl/tls1.h                                      |   28 +
  test/Makefile                                   |   22 +-
- 24 files changed, 5781 insertions(+), 54 deletions(-)
+ 28 files changed, 8177 insertions(+), 54 deletions(-)
  create mode 100644 crypto/chacha20poly1305/Makefile
  create mode 100644 crypto/chacha20poly1305/asm/chacha20_avx.pl
  create mode 100644 crypto/chacha20poly1305/asm/chacha20_avx2.pl
+ create mode 100644 crypto/chacha20poly1305/asm/chapoly_open.s
+ create mode 100644 crypto/chacha20poly1305/asm/chapoly_open_avx2.s
  create mode 100644 crypto/chacha20poly1305/asm/chapoly_seal_avx2.s
  create mode 100644 crypto/chacha20poly1305/asm/poly1305_avx.pl
  create mode 100644 crypto/chacha20poly1305/asm/poly1305_avx2.pl
@@ -43,7 +52,7 @@ Subject: [PATCH] Implementation of draft and RFC versions of CHACHA20-POLY1305
  create mode 100644 crypto/evp/e_chacha20poly1305.c
 
 diff --git a/Configure b/Configure
-index c98107a..ed12721 100755
+index c98107a..cf098b5 100755
 --- a/Configure
 +++ b/Configure
 @@ -150,25 +150,25 @@ my $tlib="-lnsl -lsocket";
@@ -61,7 +70,7 @@ index c98107a..ed12721 100755
 -my $sparcv8_asm=":sparcv8.o::des_enc-sparc.o fcrypt_b.o:::::::::::::void";
 -my $alpha_asm="alphacpuid.o:bn_asm.o alpha-mont.o::::::sha1-alpha.o:::::::ghash-alpha.o::void";
 -my $mips64_asm=":bn-mips.o mips-mont.o:::aes_cbc.o aes-mips.o:::sha1-mips.o sha256-mips.o sha512-mips.o::::::::";
-+my $x86_64_asm="x86_64cpuid.o:x86_64-gcc.o x86_64-mont.o x86_64-mont5.o x86_64-gf2m.o rsaz_exp.o rsaz-x86_64.o rsaz-avx2.o:ecp_nistz256.o ecp_nistz256-x86_64.o::aes-x86_64.o vpaes-x86_64.o bsaes-x86_64.o aesni-x86_64.o aesni-sha1-x86_64.o aesni-sha256-x86_64.o aesni-mb-x86_64.o::md5-x86_64.o:sha1-x86_64.o sha256-x86_64.o sha512-x86_64.o sha1-mb-x86_64.o sha256-mb-x86_64.o::rc4-x86_64.o rc4-md5-x86_64.o:::wp-x86_64.o:cmll-x86_64.o cmll_misc.o:ghash-x86_64.o aesni-gcm-x86_64.o::chacha20_avx.o chacha20_avx2.o poly1305_x64.o poly1305_avx2.o chapoly_seal_avx2.o";
++my $x86_64_asm="x86_64cpuid.o:x86_64-gcc.o x86_64-mont.o x86_64-mont5.o x86_64-gf2m.o rsaz_exp.o rsaz-x86_64.o rsaz-avx2.o:ecp_nistz256.o ecp_nistz256-x86_64.o::aes-x86_64.o vpaes-x86_64.o bsaes-x86_64.o aesni-x86_64.o aesni-sha1-x86_64.o aesni-sha256-x86_64.o aesni-mb-x86_64.o::md5-x86_64.o:sha1-x86_64.o sha256-x86_64.o sha512-x86_64.o sha1-mb-x86_64.o sha256-mb-x86_64.o::rc4-x86_64.o rc4-md5-x86_64.o:::wp-x86_64.o:cmll-x86_64.o cmll_misc.o:ghash-x86_64.o aesni-gcm-x86_64.o::chacha20_avx.o chacha20_avx2.o poly1305_x64.o poly1305_avx2.o chapoly_seal_avx2.o chapoly_open_avx2.o chapoly_open.o";
 +my $ia64_asm="ia64cpuid.o:bn-ia64.o ia64-mont.o:::aes_core.o aes_cbc.o aes-ia64.o::md5-ia64.o:sha1-ia64.o sha256-ia64.o sha512-ia64.o::rc4-ia64.o rc4_skey.o:::::ghash-ia64.o:::void";
 +my $sparcv9_asm="sparcv9cap.o sparccpuid.o:bn-sparcv9.o sparcv9-mont.o sparcv9a-mont.o vis3-mont.o sparct4-mont.o sparcv9-gf2m.o::des_enc-sparc.o fcrypt_b.o dest4-sparcv9.o:aes_core.o aes_cbc.o aes-sparcv9.o aest4-sparcv9.o::md5-sparcv9.o:sha1-sparcv9.o sha256-sparcv9.o sha512-sparcv9.o::::::camellia.o cmll_misc.o cmll_cbc.o cmllt4-sparcv9.o:ghash-sparcv9.o:::void";
 +my $sparcv8_asm=":sparcv8.o::des_enc-sparc.o fcrypt_b.o::::::::::::::void";
@@ -301,10 +310,10 @@ index 95adcc1..94b80a1 100644
          for (j = 0; j < SIZE_NUM; j++) {
 diff --git a/crypto/chacha20poly1305/Makefile b/crypto/chacha20poly1305/Makefile
 new file mode 100644
-index 0000000..7f47f12
+index 0000000..567ab10
 --- /dev/null
 +++ b/crypto/chacha20poly1305/Makefile
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,112 @@
 +#
 +# crypto/chacha20poly1305/Makefile
 +#
@@ -362,6 +371,10 @@ index 0000000..7f47f12
 +
 +chapoly_seal_avx2.s:asm/chapoly_seal_avx2.s
 +	cp asm/chapoly_seal_avx2.s  $@
++chapoly_open_avx2.s:asm/chapoly_open_avx2.s
++	cp asm/chapoly_open_avx2.s  $@
++chapoly_open.s:asm/chapoly_open.s
++	cp asm/chapoly_open.s  $@
 +
 +files:
 +	$(PERL) $(TOP)/util/files.pl Makefile >> $(TOP)/MINFO
@@ -1276,12 +1289,2375 @@ index 0000000..9f31f86
 +
 +close STDOUT;
 +
+diff --git a/crypto/chacha20poly1305/asm/chapoly_open.s b/crypto/chacha20poly1305/asm/chapoly_open.s
+new file mode 100644
+index 0000000..a188abd
+--- /dev/null
++++ b/crypto/chacha20poly1305/asm/chapoly_open.s
+@@ -0,0 +1,1067 @@
++##############################################################################
++#                                                                            #
++# Copyright 2016 CloudFlare LTD                                              #
++#                                                                            #
++# Licensed under the Apache License, Version 2.0 (the "License");            #
++# you may not use this file except in compliance with the License.           #
++# You may obtain a copy of the License at                                    #
++#                                                                            #
++#    http://www.apache.org/licenses/LICENSE-2.0                              #
++#                                                                            #
++# Unless required by applicable law or agreed to in writing, software        #
++# distributed under the License is distributed on an "AS IS" BASIS,          #
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
++# See the License for the specific language governing permissions and        #
++# limitations under the License.                                             #
++#                                                                            #
++##############################################################################
++#                                                                            #
++# Author:  Vlad Krasnov                                                      #
++#                                                                            #
++##############################################################################
++
++# int chapoly_open_rfc(u8* oup, u8* inp, u64 inl, u8* adp, u8* keyp);
++
++.align 32
++.chacha20_consts:
++.byte 'e','x','p','a','n','d',' ','3','2','-','b','y','t','e',' ','k'
++.rol8:
++.byte 3,0,1,2, 7,4,5,6, 11,8,9,10, 15,12,13,14
++.rol16:
++.byte 2,3,0,1, 6,7,4,5, 10,11,8,9, 14,15,12,13
++.avxInc:
++.quad 1,0
++.rSet:
++.quad 0x0FFFFFFC0FFFFFFF, 0x0FFFFFFC0FFFFFFC
++.quad 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF
++
++.align 16
++.andMasks:
++.byte 0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00
++
++
++.macro chacha_qr a,b,c,d,tmp
++  paddd \b, \a
++  pxor \a, \d
++  pshufb .rol16(%rip), \d
++  paddd \d, \c
++  pxor \c, \b
++  movdqa \b, \tmp
++  pslld $12, \tmp
++  psrld $20, \b
++  pxor \tmp, \b
++  paddd \b, \a
++  pxor \a, \d
++  pshufb .rol8(%rip), \d
++  paddd \d, \c
++  pxor \c, \b
++  movdqa \b,\tmp
++  pslld $7, \tmp
++  psrld $25, \b
++  pxor \tmp, \b
++.endm
++
++.macro mul_step_1
++  mov  0(%rsp), %rax
++  mov  %rax, t2
++  mul  acc0
++  mov  %rax, t0
++  mov  %rdx, t1
++  mov  0(%rsp), %rax
++  mul  acc1
++  imul acc2, t2
++  add  %rax, t1
++  adc  %rdx, t2
++.endm
++
++.macro mul_step_2
++  mov  8(%rsp), %rax
++  mov  %rax, t3
++  mul  acc0
++
++  add  %rax, t1
++  adc  $0, %rdx
++  mov  %rdx, acc0
++
++  mov  8(%rsp), %rax
++  mul  acc1
++  add  %rax, t2
++  adc  $0, %rdx
++.endm
++
++.macro mul_step_3
++  imul acc2, t3
++  add  acc0, t2
++  adc  %rdx, t3
++.endm
++
++.macro reduce
++  mov  t0, acc0
++  mov  t1, acc1
++  mov  t2, acc2
++  and  $3, acc2
++
++  mov  t2, t0
++  and  $-4, t0
++  mov  t3, t1
++  shrd $2, t3, t2
++  shr  $2, t3
++
++  add  t0, acc0
++  adc  t1, acc1
++  adc  $0, acc2
++  add  t2, acc0
++  adc  t3, acc1
++  adc  $0, acc2
++.endm
++
++.macro polymul
++  mul_step_1
++  mul_step_2
++  mul_step_3
++  reduce
++.endm
++
++.set tmp0, %xmm0
++.set tmp1, %xmm1
++.set tmp2, %xmm2
++.set tmp3, %xmm3
++
++.set a0, %xmm4
++.set b0, %xmm5
++.set c0, %xmm6
++.set d0, %xmm7
++.set a1, %xmm8
++.set b1, %xmm9
++.set c1, %xmm10
++.set d1, %xmm11
++.set a2, %xmm12
++.set b2, %xmm13
++.set c2, %xmm14
++.set d2, %xmm15
++.set a3, %xmm0
++.set b3, %xmm1
++.set c3, %xmm2
++.set d3, %xmm3
++
++.set oup, %rdi
++.set inp, %rsi
++.set inl_in, %rdx
++.set inl, %rbx
++.set adp, %rcx # It is free, after we hash the additional data
++.set keyp, %r8 # It is free, after we copy the key to stack
++.set rnds, %r9
++
++.set acc0, %r10
++.set acc1, %r11
++.set acc2, %r12
++.set t0, %r13
++.set t1, %r14
++.set t2, %r15
++.set t3, %rcx
++
++.globl chapoly_open_rfc
++.type chapoly_open_rfc, @function
++chapoly_open_rfc:
++
++  push %rbx
++  push %rbp
++  push %r12
++  push %r13
++  push %r14
++  push %r15
++  mov  %rsp, %rbp
++
++  mov inl_in, inl
++  # Special optimization, for very short buffers
++  cmp $128, inl
++  jbe open_128  # About 15% faster
++
++  sub  $160, %rsp     # Temporary storage
++  andq $-32, %rsp
++  movq $13, 32(%rsp)  # Store ad and pt lengths
++  movq inl, 40(%rsp)
++
++  # For a long buffer, first prepare the Poly key
++  movdqa .chacha20_consts(%rip), a0
++  movdqu 16*0(keyp), b0
++  movdqu 16*1(keyp), c0
++  movdqu 16*2(keyp), d0
++  movdqa d0, 48 + 16*3(%rsp)
++  # Store keys for safe aligned access
++  movdqa b0, 48 + 16*4(%rsp)
++  movdqa c0, 48 + 16*5(%rsp)
++
++  mov $10, rnds
++  1:
++    chacha_qr a0, b0, c0, d0, tmp0
++    palignr   $4, b0, b0
++    palignr   $8, c0, c0
++    palignr  $12, d0, d0
++    chacha_qr a0, b0, c0, d0, tmp0
++    palignr  $12, b0, b0
++    palignr   $8, c0, c0
++    palignr   $4, d0, d0
++    dec rnds
++  jnz 1b
++
++  # Add back the init values
++  paddd .chacha20_consts(%rip), a0
++  paddd 48 + 16*4(%rsp), b0
++  # Clamp and store the Poly key
++  pand  .rSet(%rip), a0
++  pand  16+.rSet(%rip), b0
++  movdqa a0, (%rsp)
++  movdqa b0, 16(%rsp)
++
++  # Now we can MAC and decypt at the same time
++  # It is important to allow in-place decryption
++
++  # First hash the aad
++  mov  (adp), acc0
++  mov  5(adp), acc1
++  shr  $24, acc1
++  mov  $1, acc2
++  polymul
++
++  # In the main loop we will decrypt and hash 256bytes each iteration
++main_loop:
++    cmp $256, inl
++    jb  exit_main_loop
++
++    movdqu 48 + 16*3(%rsp), d0
++    paddd  .avxInc(%rip), d0
++    movdqa d0, d1
++    paddd  .avxInc(%rip), d1
++    movdqa d1, d2
++    paddd  .avxInc(%rip), d2
++    movdqa d2, d3
++    paddd  .avxInc(%rip), d3
++
++    # Load the constants, store counters
++    .irpc i,0123
++    movdqa .chacha20_consts(%rip), a\i
++    movdqa 48 + 16*4(%rsp), b\i
++    movdqa 48 + 16*5(%rsp), c\i
++    movdqa d\i, 48 + 16*\i(%rsp)
++    .endr
++
++    xor rnds, rnds
++    # This is a loop that interleaves 8 ChaCha quarter rounds
++    # with 2 poly multiplications
++  1:
++        add 8*0(inp, rnds), acc0  # Hash in first 16 bytes
++        adc 8*1(inp, rnds), acc1  #
++        adc $1, acc2              #
++
++        mul_step_1                #
++        mul_step_2                #
++
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++
++        mul_step_3                #
++
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++        reduce                    #
++
++    .irpc i,0123; palignr $4, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $12, d\i, d\i; .endr
++
++        add 8*2(inp, rnds), acc0  # Hash in the next 16 bytes
++        adc 8*3(inp, rnds), acc1  #
++        adc $1, acc2              #
++
++        mul_step_1                #
++        mul_step_2                #
++
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++
++        mul_step_3                #
++
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++        reduce                    #
++
++    .irpc i,0123; palignr $12, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $4, d\i, d\i; .endr
++
++        add $8*4, rnds            #
++
++      cmp $192, rnds
++    jne 1b
++
++  1:
++        add 8*0(inp, rnds), acc0  # Hash in first 16 bytes
++        adc 8*1(inp, rnds), acc1  #
++        adc $1, acc2              #
++
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++    .irpc i,0123; palignr $4, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $12, d\i, d\i; .endr
++
++        mul_step_1                 #
++        mul_step_2                 #
++
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++        mul_step_3                 #
++        reduce                     #
++
++    .irpc i,0123; palignr $12, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $4, d\i, d\i; .endr
++
++        add $8*2, rnds             #
++
++      cmp $256, rnds
++    jne 1b
++
++    # After 20 rounds, add the init values
++    .irpc i, 0123
++    paddd .chacha20_consts(%rip), a\i
++    paddd 48 + 16*4(%rsp), b\i
++    paddd 48 + 16*5(%rsp), c\i
++    paddd 48+16*\i(%rsp), d\i
++    .endr
++
++    movdqa d3, 48 + 16*6(%rsp)
++
++    # Serialize, xor, store
++    .irpc i,012
++    movdqu 16*0 + 64*\i(inp), d3
++    pxor   d3, a\i
++    movdqu 16*1 + 64*\i(inp), d3
++    pxor   d3, b\i
++    movdqu 16*2 + 64*\i(inp), d3
++    pxor   d3, c\i
++    movdqu 16*3 + 64*\i(inp), d3
++    pxor   d3, d\i
++
++    movdqu a\i, 16*0 + 64*\i(oup)
++    movdqu b\i, 16*1 + 64*\i(oup)
++    movdqu c\i, 16*2 + 64*\i(oup)
++    movdqu d\i, 16*3 + 64*\i(oup)
++    .endr
++
++    movdqa 48 + 16*6(%rsp), d3
++
++    movdqu 16*0 + 64*3(inp), d0
++    pxor   d0, a3
++    movdqu 16*1 + 64*3(inp), d0
++    pxor   d0, b3
++    movdqu 16*2 + 64*3(inp), d0
++    pxor   d0, c3
++    movdqu 16*3 + 64*3(inp), d0
++    pxor   d0, d3
++
++    movdqu a3, 16*0 + 64*3(oup)
++    movdqu b3, 16*1 + 64*3(oup)
++    movdqu c3, 16*2 + 64*3(oup)
++    movdqu d3, 16*3 + 64*3(oup)
++
++    lea 256(inp), inp
++    lea 256(oup), oup
++    sub $256, inl
++  jmp main_loop
++
++exit_main_loop:
++
++  test inl, inl
++  jz   finalize
++  # Handle the various tail lengths efficiently
++  cmp  $64, inl
++  jbe  tail_64
++
++  cmp  $128, inl
++  jbe  tail_128
++
++  cmp  $192, inl
++  jbe  tail_192
++
++  jmp  tail_256
++
++tail_64:
++
++  # Need to encrypt up to 64 bytes - single block
++  movdqa .chacha20_consts(%rip), a0
++  movdqa 48 + 16*3(%rsp), d0
++  movdqa 48 + 16*4(%rsp), b0
++  movdqa 48 + 16*5(%rsp), c0
++  paddd  .avxInc(%rip), d0
++  movdqa d0, tmp2
++
++  xor rnds, rnds
++1:
++    cmp $16, inl
++    jb  1f
++    # Hash the rest of the input, up to <16 byte tail
++    add 8*0(inp, rnds), acc0
++    adc 8*1(inp, rnds), acc1
++    adc $1, acc2
++
++    chacha_qr a0, b0, c0, d0, tmp0
++    palignr   $4, b0, b0
++    palignr   $8, c0, c0
++    palignr  $12, d0, d0
++
++    polymul
++    sub $16, inl
++    add $16, rnds
++
++    chacha_qr a0, b0, c0, d0, tmp0
++    palignr  $12, b0, b0
++    palignr   $8, c0, c0
++    palignr   $4, d0, d0
++
++  jmp 1b
++1:
++  add rnds, inl
++1:
++    chacha_qr  a0, b0, c0, d0, tmp0
++    palignr   $4, b0, b0
++    palignr   $8, c0, c0
++    palignr  $12, d0, d0
++
++    add $16, rnds
++    chacha_qr  a0, b0, c0, d0, tmp0
++    palignr  $12, b0, b0
++    palignr   $8, c0, c0
++    palignr   $4, d0, d0
++
++    cmp $160, rnds
++  jne 1b
++
++  paddd .chacha20_consts(%rip), a0
++  paddd 48 + 16*4(%rsp), b0
++  paddd 48 + 16*5(%rsp), c0
++  paddd tmp2, d0
++
++3:
++1:
++    cmp $16, inl
++    jb  1f
++    sub $16, inl
++    movdqu (inp), tmp0
++    pxor   tmp0, a0
++    movdqu a0, (oup)
++    lea    16(inp), inp
++    lea    16(oup), oup
++
++    movdqa b0, a0
++    movdqa c0, b0
++    movdqa d0, c0
++    jmp 1b
++
++1:
++  movdqa a0, a1
++  jmp tail
++
++open_128:
++
++  sub $48, %rsp
++  andq  $-32, %rsp
++  movq  $13, 32(%rsp)
++  movq  inl, 40(%rsp)
++
++  # Prepare stream for up to 128 bytes of plaintext, plus Poly1305 key
++  .irpc i, 123; movdqu 16*(\i-1)(keyp), tmp\i; .endr
++
++  .irpc i, 012
++    movdqa .chacha20_consts(%rip), a\i
++    movdqa tmp1, b\i
++    movdqa tmp2, c\i
++  .endr
++
++  movdqa tmp3, d0
++  movdqa tmp3, d1
++  paddd  .avxInc(%rip), d1
++  movdqa d1, d2
++  paddd  .avxInc(%rip), d2
++
++  mov  $10, rnds
++  # ChaCha20 loop
++  1:
++    .irpc i, 012; chacha_qr a\i, b\i, c\i, d\i, tmp0; .endr
++    .irpc i, 012
++      palignr   $4, b\i, b\i
++      palignr   $8, c\i, c\i
++      palignr  $12, d\i, d\i
++    .endr
++    .irpc i, 012; chacha_qr a\i, b\i, c\i, d\i, tmp0; .endr
++    .irpc i, 012
++      palignr  $12, b\i, b\i
++      palignr   $8, c\i, c\i
++      palignr   $4, d\i, d\i
++    .endr
++    dec  rnds
++  jnz  1b
++
++  .irpc i, 012
++    paddd  .chacha20_consts(%rip), a\i
++    paddd  tmp1, b\i
++    paddd  tmp2, c\i
++    paddd  tmp3, d\i
++    paddd  .avxInc(%rip), tmp3
++  .endr
++
++hash_short:
++  # First we need to MAC the aad
++  pand .rSet(%rip), a0
++  pand 16+.rSet(%rip), b0
++
++  movdqa a0, (%rsp)
++  movdqa b0, 16(%rsp)
++
++  mov   (adp), acc0
++  mov   5(adp), acc1
++  shr   $24, acc1
++  mov   $1, acc2
++
++  polymul
++
++  short_loop:
++    cmp $16, inl
++    jb  tail
++    sub $16, inl
++    add (inp), acc0
++    adc 8(inp), acc1
++    adc $1, acc2
++
++    movdqu (inp), tmp0
++    pxor  tmp0, a1
++    movdqu a1, (oup)
++    lea 16(inp), inp
++    lea 16(oup), oup
++
++    polymul
++
++    movdqa b1, a1
++    movdqa c1, b1
++    movdqa d1, c1
++    movdqa a2, d1
++    movdqa b2, a2
++    movdqa c2, b2
++    movdqa d2, c2
++
++  jmp short_loop
++
++tail:
++  test inl, inl
++  jz 1f
++
++  # We can safely load the CT from the end, because it is padded with the MAC
++  mov inl, rnds
++  shl $4, rnds
++  lea .andMasks(%rip), t0
++
++  movdqu (inp), tmp0
++  add inl, inp
++  pand -16(rnds, t0), tmp0
++
++  movq tmp0, t0
++  pextrq $1, tmp0, t1
++
++  pxor a1, tmp0
++  # Storing is performed one byte at a time
++  2:
++    pextrb $0, %xmm0, (oup)
++    psrldq $1, %xmm0
++    inc oup
++    dec inl
++  jnz 2b
++
++  add t0, acc0
++  adc t1, acc1
++  adc $1, acc2
++
++  polymul
++
++1:
++
++finalize:
++  # Get buffer lengths from stack
++  add 32(%rsp), acc0
++  adc 40(%rsp), acc1
++  adc $1, acc2
++
++  polymul
++
++  # Final reduce
++  mov  acc0, t0
++  mov  acc1, t1
++  mov  acc2, t2
++
++  sub $-5, acc0
++  sbb $-1, acc1
++  sbb $3,  acc2
++
++  cmovc t0, acc0
++  cmovc t1, acc1
++  cmovc t2, acc2
++
++  add 16(%rsp), acc0
++  adc 24(%rsp), acc1
++
++  xor %eax, %eax
++  mov $1, %edx
++  xor (inp), acc0
++  xor 8(inp), acc1
++  or  acc1, acc0
++  cmovz %edx, %eax
++
++bail:
++  mov %rbp, %rsp
++  pop %r15
++  pop %r14
++  pop %r13
++  pop %r12
++  pop %rbp
++  pop %rbx
++  ret
++
++tail_128:
++  # Need to encrypt up to 64 bytes - single block
++  movdqa .chacha20_consts(%rip), a0
++  movdqa .chacha20_consts(%rip), a1
++  movdqa 48 + 16*4(%rsp), b0
++  movdqa 48 + 16*4(%rsp), b1
++  movdqa 48 + 16*5(%rsp), c0
++  movdqa 48 + 16*5(%rsp), c1
++  movdqa 48 + 16*3(%rsp), d0
++  paddd  .avxInc(%rip), d0
++  movdqa d0, d1
++  paddd  .avxInc(%rip), d1
++  movdqa d0, tmp2
++  movdqa d1, tmp3
++
++  xor rnds, rnds
++1:
++    cmp $16, inl
++    jb  1f
++    # Hash the rest of the input, up to <16 byte tail
++    add 8*0(inp, rnds), acc0
++    adc 8*1(inp, rnds), acc1
++    adc $1, acc2
++
++    chacha_qr a0, b0, c0, d0, tmp0
++    chacha_qr a1, b1, c1, d1, tmp0
++    .irpc i,01; palignr   $4, b\i, b\i
++                palignr   $8, c\i, c\i
++                palignr  $12, d\i, d\i; .endr
++
++    polymul
++    sub $16, inl
++    add $16, rnds
++
++    chacha_qr a0, b0, c0, d0, tmp0
++    chacha_qr a1, b1, c1, d1, tmp0
++    .irpc i, 01; palignr  $12, b\i, b\i
++                 palignr   $8, c\i, c\i
++                 palignr   $4, d\i, d\i; .endr
++
++  jmp 1b
++1:
++  add rnds, inl
++1:
++    chacha_qr a0, b0, c0, d0, tmp0
++    chacha_qr a1, b1, c1, d1, tmp0
++    .irpc i,01; palignr   $4, b\i, b\i
++                palignr   $8, c\i, c\i
++                palignr  $12, d\i, d\i; .endr
++    add $16, rnds
++
++    chacha_qr a0, b0, c0, d0, tmp0
++    chacha_qr a1, b1, c1, d1, tmp0
++    .irpc i, 01; palignr  $12, b\i, b\i
++                 palignr   $8, c\i, c\i
++                 palignr   $4, d\i, d\i; .endr
++    cmp $160, rnds
++  jne 1b
++
++  paddd .chacha20_consts(%rip), a0
++  paddd .chacha20_consts(%rip), a1
++  paddd 48 + 16*4(%rsp), b0
++  paddd 48 + 16*4(%rsp), b1
++  paddd 48 + 16*5(%rsp), c0
++  paddd 48 + 16*5(%rsp), c1
++  paddd tmp2, d0
++  paddd tmp3, d1
++  
++  movdqu 16*0(inp), tmp0
++  pxor   tmp0, a0
++  movdqu 16*1(inp), tmp0
++  pxor   tmp0, b0
++  movdqu 16*2(inp), tmp0
++  pxor   tmp0, c0
++  movdqu 16*3(inp), tmp0
++  pxor   tmp0, d0
++
++  movdqu a0, 16*0(oup)
++  movdqu b0, 16*1(oup)
++  movdqu c0, 16*2(oup)
++  movdqu d0, 16*3(oup)
++
++  sub $64, inl
++  lea 64(inp), inp
++  lea 64(oup), oup
++
++  movdqa a1, a0
++  movdqa b1, b0
++  movdqa c1, c0
++  movdqa d1, d0
++  jmp 3b
++
++tail_192:
++
++  movdqu 48 + 16*3(%rsp), d0
++  paddd  .avxInc(%rip), d0
++  movdqa d0, d1
++  paddd  .avxInc(%rip), d1
++  movdqa d1, d2
++  paddd  .avxInc(%rip), d2
++
++   # Load the constants, store counters
++  .irpc i,012
++  movdqa .chacha20_consts(%rip), a\i
++  movdqa 48 + 16*4(%rsp), b\i
++  movdqa 48 + 16*5(%rsp), c\i
++  movdqa d\i, 48 + 16*\i(%rsp)
++  .endr
++
++  xor rnds, rnds
++  1:
++    cmp $32, inl
++    jb  1f
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++
++        add 8*0(inp, rnds), acc0  # Hash in first 16 bytes
++        adc 8*1(inp, rnds), acc1  #
++        adc $1, acc2              #
++
++        polymul                   #
++
++    .irpc i,012; palignr $4, b\i, b\i
++                 palignr $8, c\i, c\i
++                 palignr $12, d\i, d\i; .endr
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++
++        add 8*2(inp, rnds), acc0  # Hash in the next 16 bytes
++        adc 8*3(inp, rnds), acc1  #
++        adc $1, acc2              #
++
++        polymul                   #
++
++    .irpc i,012; palignr $12, b\i, b\i
++                 palignr $8, c\i, c\i
++                 palignr $4, d\i, d\i; .endr
++
++        add $8*4, rnds            #
++        sub $8*4, inl
++
++    jmp 1b
++
++  1:
++    cmp $16, inl
++    jb  1f
++
++        add 8*0(inp, rnds), acc0  #
++        adc 8*1(inp, rnds), acc1  #
++        adc $1, acc2              #
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    .irpc i,012; palignr $4, b\i, b\i
++                 palignr $8, c\i, c\i
++                 palignr $12, d\i, d\i; .endr
++
++        mul_step_1                 #
++        mul_step_2                 #
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++
++        mul_step_3                 #
++        reduce                     #
++
++    .irpc i,012; palignr $12, b\i, b\i
++                 palignr $8, c\i, c\i
++                 palignr $4, d\i, d\i; .endr
++
++        add $8*2, rnds             #
++        sub $8*2, inl
++
++    jmp 1b
++1:
++    add rnds, inl
++1:
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    .irpc i,012; palignr $4, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $12, d\i, d\i; .endr
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    .irpc i,012; palignr $12, b\i, b\i
++                 palignr $8, c\i, c\i
++                 palignr $4, d\i, d\i; .endr
++
++        add $8*4, rnds             #
++        cmp $304, rnds
++    jb 1b
++
++    # After 20 rounds, add the init values
++    .irpc i, 012
++    paddd .chacha20_consts(%rip), a\i
++    paddd 48 + 16*4(%rsp), b\i
++    paddd 48 + 16*5(%rsp), c\i
++    paddd 48 + 16*\i(%rsp), d\i
++    .endr
++
++    # Serialize, xor, store
++    .irpc i,01
++    movdqu 16*0 + 64*\i(inp), d3
++    pxor   d3, a\i
++    movdqu 16*1 + 64*\i(inp), d3
++    pxor   d3, b\i
++    movdqu 16*2 + 64*\i(inp), d3
++    pxor   d3, c\i
++    movdqu 16*3 + 64*\i(inp), d3
++    pxor   d3, d\i
++
++    movdqu a\i, 16*0 + 64*\i(oup)
++    movdqu b\i, 16*1 + 64*\i(oup)
++    movdqu c\i, 16*2 + 64*\i(oup)
++    movdqu d\i, 16*3 + 64*\i(oup)
++    .endr
++
++    movdqa a2, a0
++    movdqa b2, b0
++    movdqa c2, c0
++    movdqa d2, d0
++
++    lea 128(inp), inp
++    lea 128(oup), oup
++    sub $128, inl
++ 
++    jmp 3b
++
++
++tail_256:
++
++  movdqu 48 + 16*3(%rsp), d0
++  paddd  .avxInc(%rip), d0
++  movdqa d0, d1
++  paddd  .avxInc(%rip), d1
++  movdqa d1, d2
++  paddd  .avxInc(%rip), d2
++  movdqa d2, d3
++  paddd  .avxInc(%rip), d3
++
++   # Load the constants, store counters
++  .irpc i,0123
++  movdqa .chacha20_consts(%rip), a\i
++  movdqa 48 + 16*4(%rsp), b\i
++  movdqa 48 + 16*5(%rsp), c\i
++  movdqa d\i, 48 + 16*\i(%rsp)
++  .endr
++
++  xor rnds, rnds
++  # This is a loop that interleaves 8 ChaCha quarter rounds
++  # with 2 poly multiplications
++  1:
++    cmp $32, inl
++    jb  1f
++
++        add 8*0(inp, rnds), acc0  # Hash in first 16 bytes
++        adc 8*1(inp, rnds), acc1  #
++        adc $1, acc2              #
++
++        mul_step_1                #
++        mul_step_2                #
++
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++
++        mul_step_3                #
++
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++        reduce                    #
++
++    .irpc i,0123; palignr $4, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $12, d\i, d\i; .endr
++
++        add 8*2(inp, rnds), acc0  # Hash in the next 16 bytes
++        adc 8*3(inp, rnds), acc1  #
++        adc $1, acc2              #
++
++        mul_step_1                #
++        mul_step_2                #
++
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++
++        mul_step_3                #
++
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++        reduce                    #
++
++    .irpc i,0123; palignr $12, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $4, d\i, d\i; .endr
++
++        add $8*4, rnds            #
++        sub $8*4, inl
++    jmp 1b
++
++  1:
++    cmp $16, inl
++    jb  1f
++
++        add 8*0(inp, rnds), acc0  # Hash in first 16 bytes
++        adc 8*1(inp, rnds), acc1  #
++        adc $1, acc2              #
++
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++    .irpc i,0123; palignr $4, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $12, d\i, d\i; .endr
++
++        mul_step_1                 #
++        mul_step_2                 #
++
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++        mul_step_3                 #
++        reduce                     #
++
++    .irpc i,0123; palignr $12, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $4, d\i, d\i; .endr
++
++        add $8*2, rnds             #
++        sub $8*2, inl
++
++    jmp 1b
++1:
++    add rnds, inl
++1:
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++    .irpc i,0123; palignr $4, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $12, d\i, d\i; .endr
++
++    movdqa c3, 48 + 16*6(%rsp)
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3; .endr
++    movdqa 48 + 16*6(%rsp), c3
++    movdqa c1, 48 + 16*6(%rsp)
++    chacha_qr a3,b3,c3,d3,c1
++    movdqa 48 + 16*6(%rsp), c1
++
++    .irpc i,0123; palignr $12, b\i, b\i
++                  palignr $8, c\i, c\i
++                  palignr $4, d\i, d\i; .endr
++
++        add $8*4, rnds             #
++        cmp $304, rnds
++    jb 1b
++
++
++    # After 20 rounds, add the init values
++    .irpc i, 0123
++    paddd .chacha20_consts(%rip), a\i
++    paddd 48 + 16*4(%rsp), b\i
++    paddd 48 + 16*5(%rsp), c\i
++    paddd 48 + 16*\i(%rsp), d\i
++    .endr
++
++    movdqa d3, 48 + 16*6(%rsp)
++
++    # Serialize, xor, store
++    .irpc i,012
++    movdqu 16*0 + 64*\i(inp), d3
++    pxor   d3, a\i
++    movdqu 16*1 + 64*\i(inp), d3
++    pxor   d3, b\i
++    movdqu 16*2 + 64*\i(inp), d3
++    pxor   d3, c\i
++    movdqu 16*3 + 64*\i(inp), d3
++    pxor   d3, d\i
++
++    movdqu a\i, 16*0 + 64*\i(oup)
++    movdqu b\i, 16*1 + 64*\i(oup)
++    movdqu c\i, 16*2 + 64*\i(oup)
++    movdqu d\i, 16*3 + 64*\i(oup)
++    .endr
++
++    movdqa a3, a0
++    movdqa b3, b0
++    movdqa c3, c0
++    movdqa 48 + 16*6(%rsp), d0
++
++    lea 192(inp), inp
++    lea 192(oup), oup
++    sub $192, inl
++ 
++    jmp 3b
++.size chapoly_open_rfc, .-chapoly_open_rfc
+diff --git a/crypto/chacha20poly1305/asm/chapoly_open_avx2.s b/crypto/chacha20poly1305/asm/chapoly_open_avx2.s
+new file mode 100644
+index 0000000..c9c45f8
+--- /dev/null
++++ b/crypto/chacha20poly1305/asm/chapoly_open_avx2.s
+@@ -0,0 +1,1262 @@
++##############################################################################
++#                                                                            #
++# Copyright 2016 CloudFlare LTD                                              #
++#                                                                            #
++# Licensed under the Apache License, Version 2.0 (the "License");            #
++# you may not use this file except in compliance with the License.           #
++# You may obtain a copy of the License at                                    #
++#                                                                            #
++#    http://www.apache.org/licenses/LICENSE-2.0                              #
++#                                                                            #
++# Unless required by applicable law or agreed to in writing, software        #
++# distributed under the License is distributed on an "AS IS" BASIS,          #
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
++# See the License for the specific language governing permissions and        #
++# limitations under the License.                                             #
++#                                                                            #
++##############################################################################
++#                                                                            #
++# Author:  Vlad Krasnov                                                      #
++#                                                                            #
++##############################################################################
++
++# int chapoly_open_rfc_avx2(u8* oup, u8* inp, u64 inl, u8* adp, u8* keyp);
++
++.align 32
++.chacha20_consts:
++.byte 'e','x','p','a','n','d',' ','3','2','-','b','y','t','e',' ','k'
++.byte 'e','x','p','a','n','d',' ','3','2','-','b','y','t','e',' ','k'
++.rol8:
++.byte 3,0,1,2, 7,4,5,6, 11,8,9,10, 15,12,13,14
++.byte 3,0,1,2, 7,4,5,6, 11,8,9,10, 15,12,13,14
++.rol16:
++.byte 2,3,0,1, 6,7,4,5, 10,11,8,9, 14,15,12,13
++.byte 2,3,0,1, 6,7,4,5, 10,11,8,9, 14,15,12,13
++.avx2Init:
++.quad 0,0,1,0
++.avx2Init2:
++.quad 1,0,0,0
++.avx2Inc:
++.quad 2,0,2,0
++.rSet:
++.quad 0x0FFFFFFC0FFFFFFF, 0x0FFFFFFC0FFFFFFC
++.quad 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF
++
++.align 16
++.andMasks:
++.byte 0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00
++.byte 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00
++
++
++.macro chacha_qr a,b,c,d,tmp
++  vpaddd \b, \a, \a
++  vpxor \a, \d, \d
++  vpshufb .rol16(%rip), \d, \d
++  vpaddd \d, \c, \c
++  vpxor \c, \b, \b
++  vpslld $12, \b, \tmp
++  vpsrld $20, \b, \b
++  vpxor \tmp, \b, \b
++  vpaddd \b, \a, \a
++  vpxor \a, \d, \d
++  vpshufb .rol8(%rip), \d, \d
++  vpaddd \d, \c, \c
++  vpxor \c, \b, \b
++  vpslld $7, \b, \tmp
++  vpsrld $25, \b, \b
++  vpxor \tmp, \b, \b
++.endm
++
++.macro mul_step_1
++  mov  0(%rsp), %rdx
++  mov  %rdx, t2
++  mulx acc0, t0, t1
++  imul acc2, t2
++  mulx acc1, %rax, %rdx
++  add  %rax, t1
++  adc  %rdx, t2
++.endm
++
++.macro mul_step_2
++  mov  8(%rsp), %rdx
++  mulx acc0, acc0, %rax
++  add  acc0, t1
++  mulx acc1, acc1, t3
++  adc  acc1, t2
++  adc  $0, t3
++.endm
++
++.macro mul_step_3
++  imul acc2, %rdx
++  add  %rax, t2
++  adc  %rdx, t3
++.endm
++
++.macro reduce
++  mov  t0, acc0
++  mov  t1, acc1
++  mov  t2, acc2
++  and  $3, acc2
++
++  mov  t2, t0
++  and  $-4, t0
++  mov  t3, t1
++  shrd $2, t3, t2
++  shr  $2, t3
++
++  add  t0, acc0
++  adc  t1, acc1
++  adc  $0, acc2
++  add  t2, acc0
++  adc  t3, acc1
++  adc  $0, acc2
++.endm
++
++.macro polymul
++  mul_step_1
++  mul_step_2
++  mul_step_3
++  reduce
++.endm
++
++.set tmp0, %ymm0
++.set tmp1, %ymm1
++.set tmp2, %ymm2
++.set tmp3, %ymm3
++
++.set a0, %ymm4
++.set b0, %ymm5
++.set c0, %ymm6
++.set d0, %ymm7
++.set a1, %ymm8
++.set b1, %ymm9
++.set c1, %ymm10
++.set d1, %ymm11
++.set a2, %ymm12
++.set b2, %ymm13
++.set c2, %ymm14
++.set d2, %ymm15
++.set a3, %ymm0
++.set b3, %ymm1
++.set c3, %ymm2
++.set d3, %ymm3
++
++.set oup, %rdi
++.set inp, %rsi
++.set inl_in, %rdx
++.set inl, %rbx
++.set adp, %rcx # It is free, after we hash the additional data
++.set keyp, %r8 # It is free, after we copy the key to stack
++.set rnds, %r9
++.set hashp, %r8
++
++.set acc0, %r10
++.set acc1, %r11
++.set acc2, %r12
++.set t0, %r13
++.set t1, %r14
++.set t2, %r15
++.set t3, %rcx
++
++.globl chapoly_open_rfc_avx2
++.type chapoly_open_rfc_avx2, @function
++chapoly_open_rfc_avx2:
++
++  vzeroupper
++  push %rbx
++  push %rbp
++  push %r12
++  push %r13
++  push %r14
++  push %r15
++  mov  %rsp, %rbp
++
++  mov inl_in, inl
++  # Special optimization, for very short buffers
++  cmp $192, inl
++  jbe open_192  # About 25% faster
++  cmp $320, inl
++  jbe open_320  # About 20% faster
++
++  sub  $288, %rsp     # Temporary storage
++  andq $-32, %rsp
++  movq $13, 32(%rsp)  # Store ad and pt lengths
++  movq inl, 40(%rsp)
++
++  # For a long buffer, we first prepare the Poly key
++  vmovdqa .chacha20_consts(%rip), %xmm4
++  vmovdqu 16*0(keyp), %xmm5
++  vmovdqu 16*1(keyp), %xmm6
++  vmovdqu 16*2(keyp), %xmm7
++
++  mov $10, rnds
++  1:
++    chacha_qr %xmm4, %xmm5, %xmm6, %xmm7, %xmm8
++    vpalignr  $4, %xmm5, %xmm5, %xmm5
++    vpalignr  $8, %xmm6, %xmm6, %xmm6
++    vpalignr $12, %xmm7, %xmm7, %xmm7
++    chacha_qr %xmm4, %xmm5, %xmm6, %xmm7, %xmm8
++    vpalignr $12, %xmm5, %xmm5, %xmm5
++    vpalignr  $8, %xmm6, %xmm6, %xmm6
++    vpalignr  $4, %xmm7, %xmm7, %xmm7
++    dec rnds
++  jnz 1b
++
++  # Add back the init values
++  vpaddd .chacha20_consts(%rip), %xmm4, %xmm4
++  vpaddd 16*0(keyp), %xmm5, %xmm5
++  # Clamp and store the Poly key
++  vpand  .rSet(%rip), %xmm4, %xmm4
++  vpand  16+.rSet(%rip), %xmm5, %xmm5
++  vmovdqa %xmm4, (%rsp)
++  vmovdqa %xmm5, 16(%rsp)
++
++  # Now we can MAC and decypt at the same time
++  # It is important to allow in-place decryption
++
++  # Expand 16 byte init values to 32 bytes
++  vbroadcasti128 16*0(keyp), b0
++  vbroadcasti128 16*1(keyp), c0
++  vbroadcasti128 16*2(keyp), d0
++  vpsubd  .avx2Init2(%rip), d0, d0
++
++  # Store the 32 byte values for future use
++  vmovdqa b0, 64+32*0(%rsp)
++  vmovdqa c0, 64+32*1(%rsp)
++  vmovdqu d0, 64+32*5(%rsp)
++
++  # First hash the aad
++  mov  (adp), acc0
++  mov  5(adp), acc1
++  shr  $24, acc1
++  mov  $1, acc2
++
++  polymul
++
++  xor hashp, hashp
++  # In the main loop we will decrypt and hash 512bytes each iteration
++main_loop:
++    cmp $512, inl
++    jb  exit_main_loop
++
++    # Load most recent counter value, and increment
++    vmovdqa 64+32*5(%rsp), d0
++    vpaddd  .avx2Inc(%rip), d0, d0
++    vpaddd  .avx2Inc(%rip), d0, d1
++    vpaddd  .avx2Inc(%rip), d1, d2
++    vpaddd  .avx2Inc(%rip), d2, d3
++    # Load the constants, store counters
++    .irpc i,0123
++    vmovdqa .chacha20_consts(%rip), a\i
++    vmovdqa 64+32*0(%rsp), b\i
++    vmovdqa 64+32*1(%rsp), c\i
++    vmovdqa d\i, 64+32*(2+\i)(%rsp)
++    .endr
++
++    # This is a spaggetti loop that interleaves 8 ChaCha quarter rounds
++    # with 3 poly multiplications
++  1:
++        add 8*0(inp, hashp), acc0  # Hash in first 16 bytes
++        adc 8*1(inp, hashp), acc1  #
++        adc $1, acc2               #
++
++      .irpc i,0123; vpaddd b\i, a\i, a\i;           .endr
++
++        mul_step_1                 #
++
++      .irpc i,0123; vpxor a\i, d\i, d\i;
++                    vpshufb .rol16(%rip), d\i, d\i; .endr
++
++        mul_step_2                 #
++
++      .irpc i,0123; vpaddd d\i, c\i, c\i;
++                    vpxor  c\i, b\i, b\i;           .endr
++
++        mul_step_3                 #
++
++      vmovdqa c3, 64+32*6(%rsp)
++      .irpc i,0123; vpslld $12, b\i, c3;
++                    vpsrld $20, b\i, b\i;
++                    vpxor  c3, b\i, b\i;            .endr
++
++        reduce                     #
++
++      vmovdqa 64+32*6(%rsp), c3
++      .irpc i,0123; vpaddd b\i, a\i, a\i;
++                    vpxor a\i, d\i, d\i;
++                    vpshufb .rol8(%rip), d\i, d\i;  .endr
++
++        add 8*2(inp, hashp), acc0  # Hash in the next 16 bytes
++        adc 8*3(inp, hashp), acc1  #
++        adc $1, acc2               #
++
++      .irpc i,0123; vpaddd  d\i, c\i, c\i;          .endr
++
++        mul_step_1                 #
++
++      .irpc i,0123; vpxor   c\i, b\i, b\i;          .endr
++      vmovdqa c3, 64+32*6(%rsp)
++      .irpc i,0123; vpslld $7, b\i, c3;
++                    vpsrld $25, b\i, b\i;
++                    vpxor  c3, b\i, b\i;            .endr
++      vmovdqa 64+32*6(%rsp), c3
++
++        mul_step_2                 #
++
++      .irpc i,0123; vpalignr $4, b\i, b\i, b\i;
++                    vpalignr $8, c\i, c\i, c\i;
++                    vpalignr $12, d\i, d\i, d\i;    .endr
++      .irpc i,0123; vpaddd   b\i, a\i, a\i;         .endr
++
++        mul_step_3                 #
++
++      .irpc i,0123; vpxor    a\i, d\i, d\i;
++                    vpshufb .rol16(%rip), d\i, d\i; .endr
++
++        reduce                     #
++
++      .irpc i,0123; vpaddd  d\i, c\i, c\i;
++                    vpxor   c\i, b\i, b\i;          .endr
++
++        add 8*4(inp, hashp), acc0  # Hash in the last 16 bytes
++        adc 8*5(inp, hashp), acc1  #
++        adc $1, acc2               #
++        add $8*6, hashp            #
++
++      vmovdqa c3, 64+32*6(%rsp)
++      .irpc i,0123; vpslld  $12, b\i, c3;
++                    vpsrld  $20, b\i, b\i;
++                    vpxor   c3, b\i, b\i;           .endr
++      vmovdqa 64+32*6(%rsp), c3
++
++        mul_step_1                 #
++
++      .irpc i,0123; vpaddd  b\i, a\i, a\i;
++                    vpxor   a\i, d\i, d\i;          .endr
++
++        mul_step_2                 #
++
++      .irpc i,0123; vpshufb .rol8(%rip), d\i, d\i;
++                    vpaddd  d\i, c\i, c\i;          .endr
++
++        mul_step_3                 #
++
++      .irpc i,0123; vpxor   c\i, b\i, b\i;          .endr
++      vmovdqa c3, 64+32*6(%rsp)
++      .irpc i,0123; vpslld $7, b\i, c3;
++                    vpsrld $25, b\i, b\i;
++                    vpxor  c3, b\i, b\i;            .endr
++      vmovdqa 64+32*6(%rsp), c3
++
++        reduce                     #
++
++
++      .irpc i,0123; vpalignr $12, b\i, b\i, b\i;
++                    vpalignr $8, c\i, c\i, c\i;
++                    vpalignr $4, d\i, d\i, d\i;     .endr
++
++      cmp $480, hashp
++    jne 1b
++    # After 20 rounds, add the init values
++    .irpc i, 0123
++    vpaddd .chacha20_consts(%rip), a\i, a\i
++    vpaddd 64+32*0(%rsp), b\i, b\i
++    vpaddd 64+32*1(%rsp), c\i, c\i
++    vpaddd 64+32*(2+\i)(%rsp), d\i, d\i
++    .endr
++    # We only hashed 480 bytes so far, 32 more to go
++      add 8*0(inp, hashp), acc0  #
++      adc 8*1(inp, hashp), acc1  #
++      adc $1, acc2               #
++      polymul                    #
++
++    vmovdqa d3, 64+32*6(%rsp)
++    # Serialize, xor, store
++    vperm2i128 $0x02, a0, b0, d3
++    vperm2i128 $0x13, a0, b0, b0
++    vperm2i128 $0x02, c0, d0, a0
++    vperm2i128 $0x13, c0, d0, c0
++    vpxor 32*0(inp), d3, d3
++    vpxor 32*1(inp), a0, a0
++    vpxor 32*2(inp), b0, b0
++    vpxor 32*3(inp), c0, c0
++    vmovdqu d3, 32*0(oup)
++    vmovdqu a0, 32*1(oup)
++    vmovdqu b0, 32*2(oup)
++    vmovdqu c0, 32*3(oup)
++    vmovdqu 64+32*6(%rsp), d3
++
++      add 8*2(inp, hashp), acc0  #
++      adc 8*3(inp, hashp), acc1  #
++      adc $1, acc2               #
++      polymul                    #
++      xor hashp, hashp           #
++
++    # Serialize, xor, store
++    .irpc i,123
++    vperm2i128 $0x02, a\i, b\i, a0
++    vperm2i128 $0x02, c\i, d\i, b0
++    vperm2i128 $0x13, a\i, b\i, c0
++    vperm2i128 $0x13, c\i, d\i, d0
++    vpxor 32*4+(128*(\i-1))(inp), a0, a0
++    vpxor 32*5+(128*(\i-1))(inp), b0, b0
++    vpxor 32*6+(128*(\i-1))(inp), c0, c0
++    vpxor 32*7+(128*(\i-1))(inp), d0, d0
++    vmovdqu a0, 32*4+(128*(\i-1))(oup)
++    vmovdqu b0, 32*5+(128*(\i-1))(oup)
++    vmovdqu c0, 32*6+(128*(\i-1))(oup)
++    vmovdqu d0, 32*7+(128*(\i-1))(oup)
++    .endr
++
++    lea 512(inp), inp
++    lea 512(oup), oup
++    sub $512, inl
++  jmp main_loop
++
++exit_main_loop:
++  mov inp, hashp
++
++  test inl, inl
++  jz   finalize
++
++  # Handle the various tail lengths efficiently
++  cmp  $128, inl
++  jbe  tail_128
++
++  cmp  $256, inl
++  jbe  tail_256
++
++  cmp  $384, inl
++  jbe  tail_384
++
++tail_512:
++  # 384 < inl < 512
++  # This means we have at least 384 bytes to hash
++  vmovdqa 64+32*5(%rsp), d0
++  vpaddd  .avx2Inc(%rip), d0, d0
++  vpaddd  .avx2Inc(%rip), d0, d1
++  vpaddd  .avx2Inc(%rip), d1, d2
++  vpaddd  .avx2Inc(%rip), d2, d3
++
++  .irpc i,0123
++  vmovdqa .chacha20_consts(%rip), a\i
++  vmovdqa 64+32*0(%rsp), b\i
++  vmovdqa 64+32*1(%rsp), c\i
++  vmovdqa d\i, 64+32*(2+\i)(%rsp)
++  .endr
++
++  mov $10, rnds
++
++  # This is a spaggetti loop that interleaves 8 ChaCha quarter rounds
++  # with 2 poly multiplications. In the end we will have 512 bytes of
++  # stream, and will have hashed 320 additional bytes
++  1:
++    add 8*0(hashp), acc0
++    adc 8*1(hashp), acc1
++    adc $1, acc2
++
++    .irpc i,0123; vpaddd b\i, a\i, a\i;           .endr
++    mul_step_1
++
++    .irpc i,0123; vpxor a\i, d\i, d\i;
++                  vpshufb .rol16(%rip), d\i, d\i; .endr
++
++    .irpc i,0123; vpaddd d\i, c\i, c\i;
++                  vpxor  c\i, b\i, b\i;           .endr
++    mul_step_2
++
++    vmovdqa c3, 64+32*6(%rsp)
++    .irpc i,0123; vpslld $12, b\i, c3;
++                  vpsrld $20, b\i, b\i;
++                  vpxor  c3, b\i, b\i;            .endr
++
++    vmovdqa 64+32*6(%rsp), c3
++    .irpc i,0123; vpaddd b\i, a\i, a\i;           .endr
++
++    mul_step_3
++
++    .irpc i,0123; vpxor a\i, d\i, d\i;
++                  vpshufb .rol8(%rip), d\i, d\i;  .endr
++
++
++    .irpc i,0123; vpaddd  d\i, c\i, c\i;          .endr
++    reduce
++
++    .irpc i,0123; vpxor   c\i, b\i, b\i;          .endr
++    vmovdqa c3, 64+32*6(%rsp)
++    .irpc i,0123; vpslld $7, b\i, c3;
++                  vpsrld $25, b\i, b\i;
++                  vpxor  c3, b\i, b\i;            .endr
++    vmovdqa 64+32*6(%rsp), c3
++
++    add 8*2(hashp), acc0
++    adc 8*3(hashp), acc1
++    adc $1, acc2
++
++    .irpc i,0123; vpalignr $4, b\i, b\i, b\i;
++                  vpalignr $8, c\i, c\i, c\i;
++                  vpalignr $12, d\i, d\i, d\i;    .endr
++    .irpc i,0123; vpaddd   b\i, a\i, a\i;         .endr
++
++    .irpc i,0123; vpxor    a\i, d\i, d\i;
++                  vpshufb .rol16(%rip), d\i, d\i; .endr
++
++    mul_step_1
++
++    .irpc i,0123; vpaddd  d\i, c\i, c\i;
++                  vpxor   c\i, b\i, b\i;          .endr
++
++    vmovdqa c3, 64+32*6(%rsp)
++    .irpc i,0123; vpslld  $12, b\i, c3;
++                  vpsrld  $20, b\i, b\i;
++                  vpxor   c3, b\i, b\i;           .endr
++    vmovdqa 64+32*6(%rsp), c3
++
++    mul_step_2
++
++    .irpc i,0123; vpaddd  b\i, a\i, a\i;
++                  vpxor   a\i, d\i, d\i;          .endr
++
++    .irpc i,0123; vpshufb .rol8(%rip), d\i, d\i;
++                  vpaddd  d\i, c\i, c\i;          .endr
++    mul_step_3
++
++    .irpc i,0123; vpxor   c\i, b\i, b\i;          .endr
++    vmovdqa c3, 64+32*6(%rsp)
++    .irpc i,0123; vpslld $7, b\i, c3;
++                  vpsrld $25, b\i, b\i;
++                  vpxor  c3, b\i, b\i;            .endr
++    vmovdqa 64+32*6(%rsp), c3
++
++    reduce
++    lea 8*4(hashp), hashp
++
++    .irpc i,0123; vpalignr $12, b\i, b\i, b\i;
++                  vpalignr $8, c\i, c\i, c\i;
++                  vpalignr $4, d\i, d\i, d\i;     .endr
++    dec rnds
++  jnz 1b
++
++  .irpc i, 0123
++    vpaddd  .chacha20_consts(%rip), a\i, a\i
++    vpaddd  64+32*0(%rsp), b\i, b\i
++    vpaddd  64+32*1(%rsp), c\i, c\i
++    vpaddd  64+32*(2+\i)(%rsp), d\i, d\i
++  .endr
++
++  vmovdqa d3, 64+32*6(%rsp)
++  # Serialize, xor, store
++  vperm2i128 $0x02, a0, b0, d3
++  vperm2i128 $0x13, a0, b0, b0
++  vperm2i128 $0x02, c0, d0, a0
++  vperm2i128 $0x13, c0, d0, c0
++  vpxor 32*0(inp), d3, d3
++  vpxor 32*1(inp), a0, a0
++  vpxor 32*2(inp), b0, b0
++  vpxor 32*3(inp), c0, c0
++  vmovdqu d3, 32*0(oup)
++  vmovdqu a0, 32*1(oup)
++  vmovdqu b0, 32*2(oup)
++  vmovdqu c0, 32*3(oup)
++  vmovdqu 64+32*6(%rsp), d3
++
++  vperm2i128  $0x02, a1, b1, a0
++  vperm2i128  $0x02, c1, d1, b0
++  vperm2i128  $0x13, a1, b1, c0
++  vperm2i128  $0x13, c1, d1, d0
++  vpxor 32*4(inp), a0, a0
++  vpxor 32*5(inp), b0, b0
++  vpxor 32*6(inp), c0, c0
++  vpxor 32*7(inp), d0, d0
++  vmovdqu a0, 32*4(oup)
++  vmovdqu b0, 32*5(oup)
++  vmovdqu c0, 32*6(oup)
++  vmovdqu d0, 32*7(oup)
++
++  vperm2i128  $0x02, a2, b2, a0
++  vperm2i128  $0x02, c2, d2, b0
++
++  vperm2i128  $0x13, c2, d2, d2
++  vperm2i128  $0x13, a2, b2, c2
++  vpxor 32*8(inp), a0, a0
++  vpxor 32*9(inp), b0, b0
++  vmovdqu a0, 32*8(oup)
++  vmovdqu b0, 32*9(oup)
++
++  lea 320(inp), inp
++  lea 320(oup), oup
++  sub $320, inl
++
++  vperm2i128  $0x02, a3, b3, a0
++  vperm2i128  $0x02, c3, d3, b0
++  vperm2i128  $0x13, a3, b3, c0
++  vperm2i128  $0x13, c3, d3, d0
++
++  jmp short_loop
++
++tail_384:
++
++  .irpc i,012
++    vmovdqa  .chacha20_consts(%rip), a\i
++    vmovdqa  64+32*0(%rsp), b\i
++    vmovdqa  64+32*1(%rsp), c\i
++  .endr
++
++  vmovdqa 64+32*5(%rsp), d0
++  vpaddd  .avx2Inc(%rip), d0, d0
++  vpaddd  .avx2Inc(%rip), d0, d1
++  vpaddd  .avx2Inc(%rip), d1, d2
++
++  vmovdqa d0, 64+32*2(%rsp)
++  vmovdqa d1, 64+32*3(%rsp)
++  vmovdqa d2, 64+32*4(%rsp)
++
++  mov $10, rnds
++  1:
++    cmp $32, inl
++    jb  1f
++    add 8*0(hashp), acc0
++    adc 8*1(hashp), acc1
++    adc $1, acc2
++    polymul
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3;  .endr
++    .irpc i,012; vpalignr $4, b\i, b\i, b\i;
++                 vpalignr $8, c\i, c\i, c\i;
++                 vpalignr $12, d\i, d\i, d\i;   .endr
++
++    add 8*2(hashp), acc0
++    adc 8*3(hashp), acc1
++    adc $1, acc2
++    lea 8*4(hashp), hashp
++    polymul
++    sub $8*4, inl
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3;  .endr
++    .irpc i,012; vpalignr $12, b\i, b\i, b\i;
++                 vpalignr $8, c\i, c\i, c\i;
++                 vpalignr $4, d\i, d\i, d\i;    .endr
++    dec rnds
++  jz  2f
++  jmp 1b
++
++  1:
++    cmp $16, inl
++    jb  1f
++    add 8*0(hashp), acc0
++    adc 8*1(hashp), acc1
++    adc $1, acc2
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3;  .endr
++    .irpc i,012; vpalignr $4, b\i, b\i, b\i;
++                 vpalignr $8, c\i, c\i, c\i;
++                 vpalignr $12, d\i, d\i, d\i;   .endr
++
++    polymul
++    lea 8*2(hashp), hashp
++    sub $8*2, inl
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3;  .endr
++    .irpc i,012; vpalignr $12, b\i, b\i, b\i;
++                 vpalignr $8, c\i, c\i, c\i;
++                 vpalignr $4, d\i, d\i, d\i;    .endr
++
++    dec rnds
++  jz  2f
++  jmp 1b
++
++  1:
++    test rnds, rnds
++    jz  2f
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3;  .endr
++    .irpc i,012; vpalignr $4, b\i, b\i, b\i;
++                 vpalignr $8, c\i, c\i, c\i;
++                 vpalignr $12, d\i, d\i, d\i;   .endr
++
++    .irpc i,012; chacha_qr a\i,b\i,c\i,d\i,c3;  .endr
++    .irpc i,012; vpalignr $12, b\i, b\i, b\i;
++                 vpalignr $8, c\i, c\i, c\i;
++                 vpalignr $4, d\i, d\i, d\i;    .endr
++
++    dec rnds
++  jnz 1b
++
++2:
++  # Add back the init values
++  .irpc i, 012
++    vpaddd  .chacha20_consts(%rip), a\i, a\i
++    vpaddd  64+32*0(%rsp), b\i, b\i
++    vpaddd  64+32*1(%rsp), c\i, c\i
++    vpaddd  64+32*(2+\i)(%rsp), d\i, d\i
++  .endr
++
++  vperm2i128  $0x02, a0, b0, tmp0
++  vperm2i128  $0x02, c0, d0, tmp1
++  vperm2i128  $0x13, a0, b0, a0
++  vperm2i128  $0x13, c0, d0, b0
++
++  vperm2i128  $0x02, a1, b1, c0
++  vperm2i128  $0x02, c1, d1, d0
++  vperm2i128  $0x13, a1, b1, a1
++  vperm2i128  $0x13, c1, d1, b1
++
++  vpxor 32*0(inp), tmp0, tmp0
++  vpxor 32*1(inp), tmp1, tmp1
++  vpxor 32*2(inp), a0, a0
++  vpxor 32*3(inp), b0, b0
++  vpxor 32*4(inp), c0, c0
++  vpxor 32*5(inp), d0, d0
++  vpxor 32*6(inp), a1, a1
++  vpxor 32*7(inp), b1, b1
++
++  vmovdqu tmp0, 32*0(oup)
++  vmovdqu tmp1, 32*1(oup)
++  vmovdqu a0, 32*2(oup)
++  vmovdqu b0, 32*3(oup)
++  vmovdqu c0, 32*4(oup)
++  vmovdqu d0, 32*5(oup)
++  vmovdqu a1, 32*6(oup)
++  vmovdqu b1, 32*7(oup)
++
++  lea 256(inp), inp
++  lea 256(oup), oup
++
++  vperm2i128  $0x13, c2, d2, b0
++  vperm2i128  $0x02, c2, d2, d2
++  vperm2i128  $0x02, a2, b2, c2
++  vperm2i128  $0x13, a2, b2, a0
++
++  sub inp, hashp
++  jmp tiny_loop
++
++tail_256:
++
++  vmovdqa .chacha20_consts(%rip), a0
++  vmovdqa .chacha20_consts(%rip), a1
++  vmovdqa 64+32*0(%rsp), b0
++  vmovdqa 64+32*0(%rsp), b1
++  vmovdqa 64+32*1(%rsp), c0
++  vmovdqa 64+32*1(%rsp), c1
++  vmovdqa 64+32*5(%rsp), d0
++  vpaddd  .avx2Inc(%rip), d0, d0
++  vpaddd  .avx2Inc(%rip), d0, d1
++
++  vmovdqa d0, tmp2
++  vmovdqa d1, tmp1
++
++  mov $10, rnds
++
++  cmp $160, inl
++  jb  2f
++1:
++    cmp $64, inl
++    jb 1f
++    sub $8*4, inl
++
++    add 8*0(hashp), acc0
++    adc 8*1(hashp), acc1
++    adc $1, acc2
++
++    polymul
++
++    chacha_qr  a0, b0, c0, d0, tmp0
++    chacha_qr  a1, b1, c1, d1, tmp0
++    vpalignr   $4, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr  $12, d0, d0, d0
++    vpalignr   $4, b1, b1, b1
++    vpalignr   $8, c1, c1, c1
++    vpalignr  $12, d1, d1, d1
++
++    add 8*2(hashp), acc0
++    adc 8*3(hashp), acc1
++    adc $1, acc2
++    lea 8*4(hashp), hashp
++
++    polymul
++
++    chacha_qr  a0, b0, c0, d0, tmp0
++    chacha_qr  a1, b1, c1, d1, tmp0
++    vpalignr  $12, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr   $4, d0, d0, d0
++    vpalignr  $12, b1, b1, b1
++    vpalignr   $8, c1, c1, c1
++    vpalignr   $4, d1, d1, d1
++
++    dec rnds
++  jnz 1b
++
++2:
++    cmp $16, inl
++    jb  1f
++    sub $16, inl
++
++    add 8*0(hashp), acc0
++    adc 8*1(hashp), acc1
++    adc $1, acc2
++    lea 16(hashp), hashp
++
++    chacha_qr  a0, b0, c0, d0, tmp0
++    chacha_qr  a1, b1, c1, d1, tmp0
++    vpalignr   $4, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr  $12, d0, d0, d0
++    vpalignr   $4, b1, b1, b1
++    vpalignr   $8, c1, c1, c1
++    vpalignr  $12, d1, d1, d1
++
++    polymul
++
++    chacha_qr  a0, b0, c0, d0, tmp0
++    chacha_qr  a1, b1, c1, d1, tmp0
++    vpalignr  $12, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr   $4, d0, d0, d0
++    vpalignr  $12, b1, b1, b1
++    vpalignr   $8, c1, c1, c1
++    vpalignr   $4, d1, d1, d1
++
++    dec rnds
++  jnz 2b
++
++1:
++    test rnds, rnds
++    jz  1f
++
++    chacha_qr  a0, b0, c0, d0, tmp0
++    chacha_qr  a1, b1, c1, d1, tmp0
++    vpalignr   $4, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr  $12, d0, d0, d0
++    vpalignr   $4, b1, b1, b1
++    vpalignr   $8, c1, c1, c1
++    vpalignr  $12, d1, d1, d1
++
++    chacha_qr  a0, b0, c0, d0, tmp0
++    chacha_qr  a1, b1, c1, d1, tmp0
++    vpalignr  $12, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr   $4, d0, d0, d0
++    vpalignr  $12, b1, b1, b1
++    vpalignr   $8, c1, c1, c1
++    vpalignr   $4, d1, d1, d1
++
++    dec rnds
++  jnz 1b
++
++1:
++  vpaddd  .chacha20_consts(%rip), a0, a0
++  vpaddd  .chacha20_consts(%rip), a1, a1
++  vpaddd  64+32*0(%rsp), b0, b0
++  vpaddd  64+32*0(%rsp), b1, b1
++  vpaddd  64+32*1(%rsp), c0, c0
++  vpaddd  64+32*1(%rsp), c1, c1
++  vpaddd  tmp2, d0, d0
++  vpaddd  tmp1, d1, d1
++
++  vperm2i128  $0x02, a0, b0, c2
++  vperm2i128  $0x02, c0, d0, d2
++  vperm2i128  $0x13, a0, b0, a0
++  vperm2i128  $0x13, c0, d0, b0
++
++  vpxor 32*0(inp), c2, c2
++  vpxor 32*1(inp), d2, d2
++  vpxor 32*2(inp), a0, a0
++  vpxor 32*3(inp), b0, b0
++  # We know we have at least 128 bytes of tail (or we would go to tail_128)
++  vmovdqu c2, 32*0(oup)
++  vmovdqu d2, 32*1(oup)
++  vmovdqu a0, 32*2(oup)
++  vmovdqu b0, 32*3(oup)
++
++  lea 32*4(inp), inp
++  lea 32*4(oup), oup
++
++  vperm2i128  $0x02, a1, b1, c2
++  vperm2i128  $0x02, c1, d1, d2
++  vperm2i128  $0x13, a1, b1, a0
++  vperm2i128  $0x13, c1, d1, b0
++
++  sub inp, hashp
++  jmp tiny_loop
++
++tail_128:
++
++  # Need to encrypt up to 128 bytes
++  vmovdqa  .chacha20_consts(%rip), a0
++  vmovdqa  64+32*0(%rsp), b0
++  vmovdqa  64+32*1(%rsp), c0
++  vmovdqa  64+32*5(%rsp), d0
++  vpaddd  .avx2Inc(%rip), d0, d0
++
++  vmovdqa d0, tmp2
++
++  mov $10, rnds
++1:
++    cmp $16, inl
++    jb  1f
++    # Hash the rest of the input, up to <16 byte tail
++    add 8*0(hashp), acc0
++    adc 8*1(hashp), acc1
++    adc $1, acc2
++    lea 16(hashp), hashp
++
++    chacha_qr  a0, b0, c0, d0, tmp0
++    vpalignr   $4, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr  $12, d0, d0, d0
++
++    polymul
++    sub $16, inl
++
++    chacha_qr  a0, b0, c0, d0, tmp0
++    vpalignr  $12, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr   $4, d0, d0, d0
++
++    dec rnds
++  jmp 1b
++
++1:
++    chacha_qr  a0, b0, c0, d0, tmp0
++    vpalignr   $4, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr  $12, d0, d0, d0
++
++    chacha_qr  a0, b0, c0, d0, tmp0
++    vpalignr  $12, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr   $4, d0, d0, d0
++
++    dec rnds
++  jnz 1b
++
++  vpaddd  .chacha20_consts(%rip), a0, a0
++  vpaddd  64+32*0(%rsp), b0, b0
++  vpaddd  64+32*1(%rsp), c0, c0
++  vpaddd  tmp2, d0, d0
++
++  vperm2i128  $0x02, a0, b0, c2
++  vperm2i128  $0x02, c0, d0, d2
++  vperm2i128  $0x13, a0, b0, a0
++  vperm2i128  $0x13, c0, d0, b0
++
++  sub inp, hashp
++  # Store plaintext for all the hashed ciphetext
++tiny_loop:
++
++  cmp $32, hashp
++  jb  2f
++
++  vpxor (inp), c2, c2
++  vmovdqu c2, (oup)
++  lea 32(inp), inp
++  lea 32(oup), oup
++  sub $32, hashp
++
++  vmovdqa d2, c2
++  vmovdqa a0, d2
++  vmovdqa b0, a0
++
++  jmp tiny_loop
++
++2:
++  cmp $16, hashp
++  jb  short_loop
++
++  vpxor (inp), %xmm14, %xmm0
++  vmovdqu %xmm0, (oup)
++  lea 16(inp), inp
++  lea 16(oup), oup
++  vextracti128 $1, c2, %xmm14
++
++  jmp short_loop
++
++open_320:
++
++  sub $48, %rsp
++  andq  $-32, %rsp
++  movq  $13, 32(%rsp)
++  movq  inl, 40(%rsp)
++
++  # Prepare stream for up to 320 bytes of plaintext, plus Poly1305 key
++  .irpc i, 123; vbroadcasti128 16*(\i-1)(keyp), tmp\i; .endr
++  vpaddd  .avx2Init(%rip), tmp3, tmp3
++
++  .irpc i, 012
++    vmovdqa  .chacha20_consts(%rip), a\i
++    vmovdqa  tmp1, b\i
++    vmovdqa  tmp2, c\i
++  .endr
++
++  vmovdqa  tmp3, d0
++  vpaddd   .avx2Inc(%rip), d0, d1
++  vpaddd   .avx2Inc(%rip), d1, d2
++
++  mov  $10, rnds
++  # ChaCha20 loop
++  1:
++    .irpc i, 012; chacha_qr a\i, b\i, c\i, d\i, tmp0; .endr
++    .irpc i, 012
++      vpalignr   $4, b\i, b\i, b\i
++      vpalignr   $8, c\i, c\i, c\i
++      vpalignr  $12, d\i, d\i, d\i
++    .endr
++    .irpc i, 012; chacha_qr a\i, b\i, c\i, d\i, tmp0; .endr
++    .irpc i, 012
++      vpalignr  $12, b\i, b\i, b\i
++      vpalignr   $8, c\i, c\i, c\i
++      vpalignr   $4, d\i, d\i, d\i
++    .endr
++    dec  rnds
++  jnz  1b
++
++  .irpc i, 012
++    vpaddd  .chacha20_consts(%rip), a\i, a\i
++    vpaddd  tmp1, b\i, b\i
++    vpaddd  tmp2, c\i, c\i
++    vpaddd  tmp3, d\i, d\i
++    vpaddd  .avx2Inc(%rip), tmp3, tmp3
++  .endr
++
++  vperm2i128  $0x02, a0, b0, tmp1
++  vperm2i128  $0x13, a0, b0, tmp2
++  vperm2i128  $0x13, c0, d0, tmp3
++
++  vperm2i128  $0x02, a1, b1, a0
++  vperm2i128  $0x02, c1, d1, b0
++  vperm2i128  $0x13, a1, b1, c0
++  vperm2i128  $0x13, c1, d1, d0
++
++  vperm2i128  $0x02, a2, b2, a1
++  vperm2i128  $0x02, c2, d2, b1
++  vperm2i128  $0x13, a2, b2, c1
++  vperm2i128  $0x13, c2, d2, d1
++
++  vmovdqa tmp1, a2
++  vmovdqa tmp2, c2
++  vmovdqa tmp3, d2
++  jmp hash_short
++
++open_192:
++
++  sub $48, %rsp
++  andq  $-32, %rsp
++  movq  $13, 32(%rsp)
++  movq  inl, 40(%rsp)
++
++  # Prepare stream for up to 192 bytes of plaintext, plus Poly1305 key
++  vbroadcasti128  16*0(keyp), a2
++  vbroadcasti128  16*1(keyp), b2
++  vbroadcasti128  16*2(keyp), c2
++  vpaddd  .avx2Init(%rip), c2, c2
++
++  vmovdqa  .chacha20_consts(%rip), a0
++  vmovdqa  .chacha20_consts(%rip), a1
++
++  vmovdqa  a2, b0
++  vmovdqa  a2, b1
++
++  vmovdqa  b2, c0
++  vmovdqa  b2, c1
++
++  vmovdqa  c2, d0
++  vpaddd   .avx2Inc(%rip), d0, d1
++  vmovdqa  d1, d2
++
++  mov  $10, rnds
++  # Chacha20 loop
++  1:
++    chacha_qr a0, b0, c0, d0, tmp0
++    chacha_qr a1, b1, c1, d1, tmp0
++
++    vpalignr   $4, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr  $12, d0, d0, d0
++    vpalignr   $4, b1, b1, b1
++    vpalignr   $8, c1, c1, c1
++    vpalignr  $12, d1, d1, d1
++
++    chacha_qr a0, b0, c0, d0, tmp0
++    chacha_qr a1, b1, c1, d1, tmp0
++
++    vpalignr  $12, b0, b0, b0
++    vpalignr   $8, c0, c0, c0
++    vpalignr   $4, d0, d0, d0
++    vpalignr  $12, b1, b1, b1
++    vpalignr   $8, c1, c1, c1
++    vpalignr   $4, d1, d1, d1
++
++    dec  rnds
++  jnz  1b
++
++  vpaddd  .chacha20_consts(%rip), a0, a0
++  vpaddd  .chacha20_consts(%rip), a1, a1
++  vpaddd  a2, b0, b0
++  vpaddd  a2, b1, b1
++  vpaddd  b2, c0, c0
++  vpaddd  b2, c1, c1
++  vpaddd  c2, d0, d0
++  vpaddd  d2, d1, d1
++
++  # At this stage a0, b0 hold the poly key, a1-d1 hold the cipher stream
++  vperm2i128  $0x02, a0, b0, a2
++  vperm2i128  $0x13, a0, b0, c2
++  vperm2i128  $0x13, c0, d0, d2
++
++  vperm2i128  $0x02, a1, b1, a0
++  vperm2i128  $0x02, c1, d1, b0
++  vperm2i128  $0x13, a1, b1, c0
++  vperm2i128  $0x13, c1, d1, d0
++
++hash_short:
++  # First we need to MAC the aad
++  vpand .rSet(%rip), a2, a2
++
++  vmovdqa a2, (%rsp)
++
++  mov   (adp), acc0
++  mov   5(adp), acc1
++  shr   $24, acc1
++  mov   $1, acc2
++
++  polymul
++
++  short_loop:
++    cmp $16, inl
++    jb  tail_a
++    sub $16, inl
++
++    add (inp), acc0
++    adc 8(inp), acc1
++    adc $1, acc2
++    vextracti128 $0, c2, %xmm0
++    vpxor (inp), %xmm0, %xmm0
++    vmovdqu %xmm0, (oup)
++    lea 16(inp), inp
++    lea 16(oup), oup
++
++    polymul
++
++    cmp $16, inl
++    jb  tail_b
++    sub $16, inl
++
++    add (inp), acc0
++    adc 8(inp), acc1
++    adc $1, acc2
++    vextracti128 $1, c2, %xmm0
++    vpxor (inp), %xmm0, %xmm0
++    vmovdqu %xmm0, (oup)
++    lea 16(inp), inp
++    lea 16(oup), oup
++
++    vmovdqa d2, c2
++    vmovdqa a0, d2
++    vmovdqa b0, a0
++    vmovdqa c0, b0
++    vmovdqa d0, c0
++
++    vmovdqa a1, d0
++    vmovdqa b1, a1
++    vmovdqa c1, b1
++    vmovdqa d1, c1
++    vmovdqa a2, d1
++    vmovdqa b2, a2
++    polymul
++
++  jmp short_loop
++
++tail_b:
++  vextracti128 $1, c2, %xmm14
++tail_a:
++  test inl, inl
++  jz 1f
++
++  # We can safely load the CT from the end, because it is padded with the MAC
++
++  mov inl, rnds
++  shl $4, rnds
++  lea .andMasks(%rip), t0
++
++  vmovdqu (inp), %xmm0
++  add inl, inp
++  vpand -16(rnds, t0), %xmm0, %xmm0
++
++  vmovq %xmm0, t0
++  vpextrq $1, %xmm0, t1
++
++  vpxor %xmm14, %xmm0, %xmm0
++
++  2:
++    vpextrb $0, %xmm0, (oup)
++    vpsrldq $1, %xmm0, %xmm0
++    inc oup
++    dec inl
++  jnz 2b
++
++  add t0, acc0
++  adc t1, acc1
++  adc $1, acc2
++
++  polymul
++
++1:
++
++finalize:
++  # Get buffer lengths from stack
++  add 32(%rsp), acc0
++  adc 40(%rsp), acc1
++  adc $1, acc2
++
++  polymul
++
++  # Final reduce
++  mov  acc0, t0
++  mov  acc1, t1
++  mov  acc2, t2
++
++  sub $-5, acc0
++  sbb $-1, acc1
++  sbb $3,  acc2
++
++  cmovc t0, acc0
++  cmovc t1, acc1
++  cmovc t2, acc2
++
++  add 16(%rsp), acc0
++  adc 24(%rsp), acc1
++
++  xor %eax, %eax
++  mov $1, %edx
++  xor (inp), acc0
++  xor 8(inp), acc1
++  or  acc1, acc0
++  cmovz %edx, %eax
++
++bail:
++  mov %rbp, %rsp
++  pop %r15
++  pop %r14
++  pop %r13
++  pop %r12
++  pop %rbp
++  pop %rbx
++  vzeroupper
++  ret
++.size chapoly_open_rfc_avx2, .-chapoly_open_rfc_avx2
 diff --git a/crypto/chacha20poly1305/asm/chapoly_seal_avx2.s b/crypto/chacha20poly1305/asm/chapoly_seal_avx2.s
 new file mode 100644
-index 0000000..3645f13
+index 0000000..0d5fb4e
 --- /dev/null
 +++ b/crypto/chacha20poly1305/asm/chapoly_seal_avx2.s
-@@ -0,0 +1,1035 @@
+@@ -0,0 +1,1057 @@
++##############################################################################
++#                                                                            #
++# Copyright 2016 CloudFlare LTD                                              #
++#                                                                            #
++# Licensed under the Apache License, Version 2.0 (the "License");            #
++# you may not use this file except in compliance with the License.           #
++# You may obtain a copy of the License at                                    #
++#                                                                            #
++#    http://www.apache.org/licenses/LICENSE-2.0                              #
++#                                                                            #
++# Unless required by applicable law or agreed to in writing, software        #
++# distributed under the License is distributed on an "AS IS" BASIS,          #
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
++# See the License for the specific language governing permissions and        #
++# limitations under the License.                                             #
++#                                                                            #
++##############################################################################
++#                                                                            #
++# Author:  Vlad Krasnov                                                      #
++#                                                                            #
++##############################################################################
++
 +# void chapoly_seal_rfc_avx2(u8* oup, u8* inp, u64 inl, u8* adp, u8* keyp);
 +
 +.align 32
@@ -3057,7 +5433,7 @@ index 0000000..cedeca1
 +
 diff --git a/crypto/chacha20poly1305/asm/poly1305_avx2.pl b/crypto/chacha20poly1305/asm/poly1305_avx2.pl
 new file mode 100644
-index 0000000..d2dd51f
+index 0000000..fccd7e0
 --- /dev/null
 +++ b/crypto/chacha20poly1305/asm/poly1305_avx2.pl
 @@ -0,0 +1,984 @@
@@ -3477,7 +5853,7 @@ index 0000000..d2dd51f
 +  cmp   \$512, $in_len
 +  jge   2f
 +
-+  jmp   poly1305_update_x64
++  jmp   poly1305_update_x64\@PLT
 +
 +2:
 +  call poly1305_init_avx2
@@ -3983,7 +6359,7 @@ index 0000000..d2dd51f
 +$code.=<<___;
 +  cmpq  \$0, 8*7($state)
 +  jne 1f
-+  jmp poly1305_finish_x64
++  jmp poly1305_finish_x64\@PLT
 +
 +1:
 +  mov  $_A0_($state), %r8d
@@ -4502,10 +6878,10 @@ index 0000000..3044751
 +
 diff --git a/crypto/chacha20poly1305/chacha20poly1305.h b/crypto/chacha20poly1305/chacha20poly1305.h
 new file mode 100644
-index 0000000..a798186
+index 0000000..602f6fc
 --- /dev/null
 +++ b/crypto/chacha20poly1305/chacha20poly1305.h
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,86 @@
 +/* Copyright (c) 2014, Google Inc.
 + *
 + * Permission to use, copy, modify, and/or distribute this software for any
@@ -4580,6 +6956,10 @@ index 0000000..a798186
 +
 +void chapoly_seal_rfc_avx2(uint8_t *oup, const uint8_t *inp, uint64_t inl,
 +                           const uint8_t *adp, const uint8_t *keyp);
++int  chapoly_open_rfc_avx2(uint8_t *oup, const uint8_t *inp, uint64_t inl,
++                           const uint8_t *adp, const uint8_t *keyp);
++int  chapoly_open_rfc(uint8_t *oup, const uint8_t *inp, uint64_t inl,
++                      const uint8_t *adp, const uint8_t *keyp);
 +#endif
 +
 +
@@ -5465,12 +7845,26 @@ index aaaad98..9ebb217 100644
  e_des.o: ../../e_os.h ../../include/openssl/asn1.h ../../include/openssl/bio.h
  e_des.o: ../../include/openssl/buffer.h ../../include/openssl/crypto.h
  e_des.o: ../../include/openssl/des.h ../../include/openssl/des_old.h
+diff --git a/crypto/evp/c_allc.c b/crypto/evp/c_allc.c
+index 280e584..03217df 100644
+--- a/crypto/evp/c_allc.c
++++ b/crypto/evp/c_allc.c
+@@ -163,6 +163,9 @@ void OpenSSL_add_all_ciphers(void)
+     EVP_add_cipher_alias(SN_rc5_cbc, "RC5");
+ #endif
+ 
++    EVP_add_cipher(EVP_chacha20_poly1305());
++    EVP_add_cipher(EVP_chacha20_poly1305_draft());
++
+ #ifndef OPENSSL_NO_AES
+     EVP_add_cipher(EVP_aes_128_ecb());
+     EVP_add_cipher(EVP_aes_128_cbc());
 diff --git a/crypto/evp/e_chacha20poly1305.c b/crypto/evp/e_chacha20poly1305.c
 new file mode 100644
-index 0000000..8e99986
+index 0000000..d3bb253
 --- /dev/null
 +++ b/crypto/evp/e_chacha20poly1305.c
-@@ -0,0 +1,452 @@
+@@ -0,0 +1,484 @@
 +/* ====================================================================
 + * Copyright (c) 2001-2014 The OpenSSL Project.  All rights reserved.
 + *
@@ -5697,16 +8091,36 @@ index 0000000..8e99986
 +    /* Fix for MAC */
 +    inl -= POLY1305_MAC_LEN;
 +
++#ifdef CHAPOLY_x86_64_ASM
++    if (!aead_ctx->draft) {
++        if (!ctx->encrypt) {
++            if ((OPENSSL_ia32cap_loc()[1] >> 5) & 1) {          /* AVX2 */
++                cmp = chapoly_open_rfc_avx2(out, in, inl,
++                                            aead_ctx->chacha_buffer,
++                                            aead_ctx->nonce);
++            } else {
++                cmp = chapoly_open_rfc(out, in, inl, aead_ctx->chacha_buffer,
++                                       aead_ctx->nonce);
++            }
++
++            if (!cmp) {
++                OPENSSL_cleanse(out, inl);
++                return -1;
++            }
++
++            return inl;
++
++        } else if ((OPENSSL_ia32cap_loc()[1] >> 5) & 1) {          /* AVX2 */
++            chapoly_seal_rfc_avx2(out, in, inl, aead_ctx->chacha_buffer,
++                                  aead_ctx->nonce);
++            return inl + POLY1305_MAC_LEN;
++        }
++    }
++#endif
++
 +    if (!ctx->encrypt) {
 +        poly_update(aead_ctx, in, inl);
 +    }
-+#ifdef CHAPOLY_x86_64_ASM
-+    else if (!aead_ctx->draft && (OPENSSL_ia32cap_loc()[1] >> 5) & 1) { // avx2
-+        chapoly_seal_rfc_avx2(out, in, inl, aead_ctx->chacha_buffer,
-+                              aead_ctx->nonce);
-+        return inl;
-+    }
-+#endif
 +
 +    i = 0;
 +    if (inl < 256) {
@@ -5819,11 +8233,23 @@ index 0000000..8e99986
 +            }
 +
 +#ifdef CHAPOLY_x86_64_ASM
-+            if (ctx->encrypt && !aead_ctx->draft && (OPENSSL_ia32cap_loc()[1] >> 5) & 1) {
-+              /* Seal will MAC the aad */
-+              memcpy(aead_ctx->chacha_buffer, ptr, arg);
-+              aead_ctx->valid = 1;
-+              return POLY1305_MAC_LEN;
++            if (!aead_ctx->draft) {
++                /* For RFC, use optimized seal/open */
++                if (!ctx->encrypt) {
++                    memcpy(aad, ptr, arg);
++                    unsigned int len = (aad[arg-2] << 8) | aad[arg-1];
++                    len -= POLY1305_MAC_LEN;
++                    aad[arg-2] = len>>8;
++                    aad[arg-1] = len & 0xff;
++                    memcpy(aead_ctx->chacha_buffer, aad, arg);
++                    aead_ctx->valid = 1;
++                    return POLY1305_MAC_LEN;
++                } else if ((OPENSSL_ia32cap_loc()[1] >> 5) & 1) {
++                    /* No seal for SSE4 yet */
++                    memcpy(aead_ctx->chacha_buffer, ptr, arg);
++                    aead_ctx->valid = 1;
++                    return POLY1305_MAC_LEN;
++                }
 +            }
 +#endif
 +
@@ -6105,6 +8531,19 @@ index 04d4007..a5c8a3a 100644
  # define SSL_TXT_CAMELLIA128     "CAMELLIA128"
  # define SSL_TXT_CAMELLIA256     "CAMELLIA256"
  # define SSL_TXT_CAMELLIA        "CAMELLIA"
+diff --git a/ssl/ssl_algs.c b/ssl/ssl_algs.c
+index e6f515f..15b5af6 100644
+--- a/ssl/ssl_algs.c
++++ b/ssl/ssl_algs.c
+@@ -85,6 +85,8 @@ int SSL_library_init(void)
+      */
+     EVP_add_cipher(EVP_rc2_40_cbc());
+ #endif
++    EVP_add_cipher(EVP_chacha20_poly1305());
++    EVP_add_cipher(EVP_chacha20_poly1305_draft());
+ #ifndef OPENSSL_NO_AES
+     EVP_add_cipher(EVP_aes_128_cbc());
+     EVP_add_cipher(EVP_aes_192_cbc());
 diff --git a/ssl/ssl_ciph.c b/ssl/ssl_ciph.c
 index 6957bda..21eae5c 100644
 --- a/ssl/ssl_ciph.c

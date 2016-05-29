@@ -1,6 +1,6 @@
-From 3e6c982a8f8194703e15f6ed4238843b84b066d9 Mon Sep 17 00:00:00 2001
+From baa4ed537c8a63b732aa0df1b8aacc30ab282598 Mon Sep 17 00:00:00 2001
 From: Jiale Zhi and Felix Buenemann
-Date: Fri, 27 May 2016 18:36:56 +0200
+Date: Mon, 30 May 2016 00:21:15 +0200
 Subject: [PATCH] Add SPDY support back to Nginx with HTTP/2
 
 ---
@@ -8,7 +8,7 @@ Subject: [PATCH] Add SPDY support back to Nginx with HTTP/2
  auto/options                           |    3 +
  auto/sources                           |    8 +
  src/core/ngx_connection.h              |    1 +
- src/http/modules/ngx_http_ssl_module.c |   52 +-
+ src/http/modules/ngx_http_ssl_module.c |   55 +-
  src/http/ngx_http.c                    |   27 +
  src/http/ngx_http.h                    |    6 +
  src/http/ngx_http_core_module.c        |   22 +-
@@ -23,7 +23,7 @@ Subject: [PATCH] Add SPDY support back to Nginx with HTTP/2
  src/http/ngx_http_spdy_module.h        |   41 +
  src/http/ngx_http_upstream.c           |   11 +
  src/http/v2/ngx_http_v2_module.c       |   69 -
- 19 files changed, 5856 insertions(+), 78 deletions(-)
+ 19 files changed, 5859 insertions(+), 78 deletions(-)
  create mode 100644 src/http/ngx_http_spdy.c
  create mode 100644 src/http/ngx_http_spdy.h
  create mode 100644 src/http/ngx_http_spdy_filter_module.c
@@ -128,7 +128,7 @@ index 977f028..ee0e62a 100644
  
  struct ngx_connection_s {
 diff --git a/src/http/modules/ngx_http_ssl_module.c b/src/http/modules/ngx_http_ssl_module.c
-index 7b051ea..97b71e7 100644
+index 7b051ea..2f73116 100644
 --- a/src/http/modules/ngx_http_ssl_module.c
 +++ b/src/http/modules/ngx_http_ssl_module.c
 @@ -326,10 +326,10 @@ ngx_http_ssl_alpn_select(ngx_ssl_conn_t *ssl_conn, const unsigned char **out,
@@ -180,7 +180,7 @@ index 7b051ea..97b71e7 100644
      {
          srv = (unsigned char *) NGX_HTTP_NPN_ADVERTISE;
          srvlen = sizeof(NGX_HTTP_NPN_ADVERTISE) - 1;
-@@ -379,26 +397,50 @@ static int
+@@ -379,19 +397,32 @@ static int
  ngx_http_ssl_npn_advertised(ngx_ssl_conn_t *ssl_conn,
      const unsigned char **out, unsigned int *outlen, void *arg)
  {
@@ -215,10 +215,13 @@ index 7b051ea..97b71e7 100644
      if (hc->addr_conf->http2) {
          *out =
              (unsigned char *) NGX_HTTP_V2_NPN_ADVERTISE NGX_HTTP_NPN_ADVERTISE;
-         *outlen = sizeof(NGX_HTTP_V2_NPN_ADVERTISE NGX_HTTP_NPN_ADVERTISE) - 1;
+@@ -399,6 +430,20 @@ ngx_http_ssl_npn_advertised(ngx_ssl_conn_t *ssl_conn,
  
          return SSL_TLSEXT_ERR_OK;
-+    } else
+     }
++#endif
++#if (NGX_HTTP_V2 && NGX_HTTP_SPDY)
++    else
 +#endif
 +#if (NGX_HTTP_SPDY)
 +    if (hc->addr_conf->spdy) {
@@ -226,7 +229,7 @@ index 7b051ea..97b71e7 100644
 +        *outlen = sizeof(NGX_SPDY_NPN_ADVERTISE NGX_HTTP_NPN_ADVERTISE) - 1;
 +
 +        return SSL_TLSEXT_ERR_OK;
-     }
++    }
 +#endif
 +
 +#if (NGX_HTTP_V2 || NGX_HTTP_SPDY)

@@ -20,7 +20,7 @@ GCM/CHACHA-POLY).
 Logic:
 Start each connection with small records (1369 byte default, change with
 ssl_dyn_rec_size_lo). After a given number of records (40, change with
-ssl_dyn_rec_threshold) start sending larger records (4229, ssl_dyn_rec_size_lo).
+ssl_dyn_rec_threshold) start sending larger records (4229, ssl_dyn_rec_size_hi).
 Eventually after the same number of records, start sending the largest records
 (ssl_buffer_size).
 In case the connection idles for a given amount of time (1s,

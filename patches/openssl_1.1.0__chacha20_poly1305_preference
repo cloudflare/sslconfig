@@ -1,0 +1,60 @@
+diff --git a/ssl/s3_lib.c b/ssl/s3_lib.c
+index e94ee83..3cd7e3a 100644
+--- a/ssl/s3_lib.c
++++ b/ssl/s3_lib.c
+@@ -3582,6 +3582,7 @@ const SSL_CIPHER *ssl3_choose_cipher(SSL *s, STACK_OF(SSL_CIPHER) *clnt,
+     STACK_OF(SSL_CIPHER) *prio, *allow;
+     int i, ii, ok;
+     unsigned long alg_k, alg_a, mask_k, mask_a;
++    int use_chacha = 0;
+ 
+     /* Let's see which ciphers we can support */
+ 
+@@ -3610,13 +3611,20 @@ const SSL_CIPHER *ssl3_choose_cipher(SSL *s, STACK_OF(SSL_CIPHER) *clnt,
+         fprintf(stderr, "%p:%s\n", (void *)c, c->name);
+     }
+ #endif
+-
++retry:
+     if (s->options & SSL_OP_CIPHER_SERVER_PREFERENCE || tls1_suiteb(s)) {
+         prio = srvr;
+         allow = clnt;
++        /* Use ChaCha20+Poly1305 if it's client's most preferred cipher suite */
++        if (sk_SSL_CIPHER_num(clnt) > 0) {
++            c = sk_SSL_CIPHER_value(clnt, 0);
++            if (c->algorithm_enc == SSL_CHACHA20POLY1305)
++                use_chacha = 1;
++        }
+     } else {
+         prio = clnt;
+         allow = srvr;
++        use_chacha = 1;
+     }
+ 
+     tls1_set_cert_validity(s);
+@@ -3634,6 +3642,10 @@ const SSL_CIPHER *ssl3_choose_cipher(SSL *s, STACK_OF(SSL_CIPHER) *clnt,
+              DTLS_VERSION_GT(s->version, c->max_dtls)))
+             continue;
+ 
++        /* Skip ChaCha unless top client priority */
++        if (c->algorithm_enc == SSL_CHACHA20POLY1305 && !use_chacha)
++            continue;
++
+         mask_k = s->s3->tmp.mask_k;
+         mask_a = s->s3->tmp.mask_a;
+ #ifndef OPENSSL_NO_SRP
+@@ -3687,6 +3699,14 @@ const SSL_CIPHER *ssl3_choose_cipher(SSL *s, STACK_OF(SSL_CIPHER) *clnt,
+             break;
+         }
+     }
++
++    if (ret == NULL && !use_chacha) {
++        /* If no shared cipher was found due to some unusual preferences, try
++         * again with CHACHA enabled even if not top priority */
++        use_chacha = 1;
++        goto retry;
++    }
++
+     return (ret);
+ }
+ 

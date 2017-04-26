@@ -520,7 +520,7 @@ index 2f66484..c6006a0 100644
  
      if (ngx_http_test_expect(r) != NGX_OK) {
          return NGX_HTTP_INTERNAL_SERVER_ERROR;
-diff --git a/b/src/http/ngx_http_spdy.c b/src/http/ngx_http_spdy.c
+diff --git a/src/http/ngx_http_spdy.c b/src/http/ngx_http_spdy.c
 new file mode 100644
 index 0000000..21c5217
 --- /dev/null
@@ -4227,7 +4227,7 @@ index 0000000..21c5217
 +                   "spdy zfree: %p", address);
 +#endif
 +}
-diff --git a/b/src/http/ngx_http_spdy.h b/src/http/ngx_http_spdy.h
+diff --git a/src/http/ngx_http_spdy.h b/src/http/ngx_http_spdy.h
 new file mode 100644
 index 0000000..df24495
 --- /dev/null
@@ -4494,7 +4494,7 @@ index 0000000..df24495
 +#define ngx_spdy_frame_write_window  ngx_spdy_frame_aligned_write_uint32
 +
 +#endif /* _NGX_HTTP_SPDY_H_INCLUDED_ */
-diff --git a/b/src/http/ngx_http_spdy_filter_module.c b/src/http/ngx_http_spdy_filter_module.c
+diff --git a/src/http/ngx_http_spdy_filter_module.c b/src/http/ngx_http_spdy_filter_module.c
 new file mode 100644
 index 0000000..377e935
 --- /dev/null
@@ -5722,7 +5722,7 @@ index 0000000..377e935
 +
 +    return NGX_OK;
 +}
-diff --git a/b/src/http/ngx_http_spdy_module.c b/src/http/ngx_http_spdy_module.c
+diff --git a/src/http/ngx_http_spdy_module.c b/src/http/ngx_http_spdy_module.c
 new file mode 100644
 index 0000000..5178a36
 --- /dev/null
@@ -6136,7 +6136,7 @@ index 0000000..5178a36
 +
 +    return NGX_CONF_OK;
 +}
-diff --git a/b/src/http/ngx_http_spdy_module.h b/src/http/ngx_http_spdy_module.h
+diff --git a/src/http/ngx_http_spdy_module.h b/src/http/ngx_http_spdy_module.h
 new file mode 100644
 index 0000000..5242322
 --- /dev/null

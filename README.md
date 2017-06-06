@@ -10,9 +10,6 @@ Cloudflare repository, but dates may not exactly match when changes are made.
 There is a single file called conf which contains the configuration used in
 Cloudflare's NGINX servers. This is only a fragment of the configuration.
 
-We currently use OpenSSL 1.0.2-stable (+ patches).
-
-
 ChaCha20/Poly1305 patch
 -----------------------
 

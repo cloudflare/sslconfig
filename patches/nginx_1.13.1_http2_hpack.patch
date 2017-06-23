@@ -1,0 +1,1006 @@
+From d8fc95eb37e1e8e2ab49696b43bad931a6e08456 Mon Sep 17 00:00:00 2001
+From: Vlad Krasnov <vlad@cloudflare.com>
+Date: Thu, 22 Jun 2017 19:01:04 -0700
+Subject: [PATCH 1/1] HTTP/2: add support for HPACK encoding
+
+Add support for full HPACK encoding as per RFC7541.
+This modification improves header compression ratio by 5-10% for the first
+response, and by 40-95% for consequential responses on the connection.
+The implementation is similar to the one used by Cloudflare.
+---
+ auto/modules                            |   4 +
+ auto/options                            |   3 +
+ src/core/ngx_murmurhash.c               |  60 +++++
+ src/core/ngx_murmurhash.h               |   2 +
+ src/http/v2/ngx_http_v2.c               |  13 +
+ src/http/v2/ngx_http_v2.h               |  81 ++++++
+ src/http/v2/ngx_http_v2_filter_module.c | 154 +++---------
+ src/http/v2/ngx_http_v2_table.c         | 431 ++++++++++++++++++++++++++++++++
+ 8 files changed, 632 insertions(+), 116 deletions(-)
+
+diff --git a/auto/modules b/auto/modules
+index be3561e6..1be97dd1 100644
+--- a/auto/modules
++++ b/auto/modules
+@@ -436,6 +436,10 @@ if [ $HTTP = YES ]; then
+         . auto/module
+     fi
+ 
++    if [ $HTTP_V2_HPACK_ENC = YES ]; then
++        have=NGX_HTTP_V2_HPACK_ENC . auto/have
++    fi
++
+     if :; then
+         ngx_module_name=ngx_http_static_module
+         ngx_module_incs=
+diff --git a/auto/options b/auto/options
+index 66b822a7..9e58e7dd 100644
+--- a/auto/options
++++ b/auto/options
+@@ -59,6 +59,7 @@ HTTP_CHARSET=YES
+ HTTP_GZIP=YES
+ HTTP_SSL=NO
+ HTTP_V2=NO
++HTTP_V2_HPACK_ENC=NO
+ HTTP_SSI=YES
+ HTTP_POSTPONE=NO
+ HTTP_REALIP=NO
+@@ -221,6 +222,7 @@ $0: warning: the \"--with-ipv6\" option is deprecated"
+ 
+         --with-http_ssl_module)          HTTP_SSL=YES               ;;
+         --with-http_v2_module)           HTTP_V2=YES                ;;
++        --with-http_v2_hpack_enc)        HTTP_V2_HPACK_ENC=YES      ;;
+         --with-http_realip_module)       HTTP_REALIP=YES            ;;
+         --with-http_addition_module)     HTTP_ADDITION=YES          ;;
+         --with-http_xslt_module)         HTTP_XSLT=YES              ;;
+@@ -430,6 +432,7 @@ cat << END
+ 
+   --with-http_ssl_module             enable ngx_http_ssl_module
+   --with-http_v2_module              enable ngx_http_v2_module
++  --with-http_v2_hpack_enc           enable ngx_http_v2_hpack_enc
+   --with-http_realip_module          enable ngx_http_realip_module
+   --with-http_addition_module        enable ngx_http_addition_module
+   --with-http_xslt_module            enable ngx_http_xslt_module
+diff --git a/src/core/ngx_murmurhash.c b/src/core/ngx_murmurhash.c
+index 5ade658d..4932f20d 100644
+--- a/src/core/ngx_murmurhash.c
++++ b/src/core/ngx_murmurhash.c
+@@ -50,3 +50,63 @@ ngx_murmur_hash2(u_char *data, size_t len)
+ 
+     return h;
+ }
++
++
++uint64_t
++ngx_murmur_hash2_64(u_char *data, size_t len, uint64_t seed)
++{
++    uint64_t  h, k;
++
++    h = seed ^ len;
++
++    while (len >= 8) {
++        k  = data[0];
++        k |= data[1] << 8;
++        k |= data[2] << 16;
++        k |= data[3] << 24;
++        k |= (uint64_t)data[4] << 32;
++        k |= (uint64_t)data[5] << 40;
++        k |= (uint64_t)data[6] << 48;
++        k |= (uint64_t)data[7] << 56;
++
++        k *= 0xc6a4a7935bd1e995ull;
++        k ^= k >> 47;
++        k *= 0xc6a4a7935bd1e995ull;
++
++        h ^= k;
++        h *= 0xc6a4a7935bd1e995ull;
++
++        data += 8;
++        len -= 8;
++    }
++
++    switch (len) {
++    case 7:
++        h ^= (uint64_t)data[6] << 48;
++        /* fall through */
++    case 6:
++        h ^= (uint64_t)data[5] << 40;
++        /* fall through */
++    case 5:
++        h ^= (uint64_t)data[4] << 32;
++        /* fall through */
++    case 4:
++        h ^= data[3] << 24;
++        /* fall through */
++    case 3:
++        h ^= data[2] << 16;
++        /* fall through */
++    case 2:
++        h ^= data[1] << 8;
++        /* fall through */
++    case 1:
++        h ^= data[0];
++        h *= 0xc6a4a7935bd1e995ull;
++    }
++
++    h ^= h >> 47;
++    h *= 0xc6a4a7935bd1e995ull;
++    h ^= h >> 47;
++
++    return h;
++}
+diff --git a/src/core/ngx_murmurhash.h b/src/core/ngx_murmurhash.h
+index 54e867d3..322b3df9 100644
+--- a/src/core/ngx_murmurhash.h
++++ b/src/core/ngx_murmurhash.h
+@@ -15,5 +15,7 @@
+ 
+ uint32_t ngx_murmur_hash2(u_char *data, size_t len);
+ 
++uint64_t ngx_murmur_hash2_64(u_char *data, size_t len, uint64_t seed);
++
+ 
+ #endif /* _NGX_MURMURHASH_H_INCLUDED_ */
+diff --git a/src/http/v2/ngx_http_v2.c b/src/http/v2/ngx_http_v2.c
+index ed78638c..11d31e5a 100644
+--- a/src/http/v2/ngx_http_v2.c
++++ b/src/http/v2/ngx_http_v2.c
+@@ -245,6 +245,8 @@ ngx_http_v2_init(ngx_event_t *rev)
+ 
+     h2c->frame_size = NGX_HTTP_V2_DEFAULT_FRAME_SIZE;
+ 
++    h2c->max_hpack_table_size = NGX_HTTP_V2_DEFAULT_HPACK_TABLE_SIZE;
++
+     h2scf = ngx_http_get_module_srv_conf(hc->conf_ctx, ngx_http_v2_module);
+ 
+     h2c->pool = ngx_create_pool(h2scf->pool_size, h2c->connection->log);
+@@ -2013,6 +2015,17 @@ ngx_http_v2_state_settings_params(ngx_http_v2_connection_t *h2c, u_char *pos,
+             h2c->frame_size = value;
+             break;
+ 
++        case NGX_HTTP_V2_HEADER_TABLE_SIZE_SETTING:
++
++            if (value > NGX_HTTP_V2_MAX_HPACK_TABLE_SIZE) {
++                h2c->max_hpack_table_size = NGX_HTTP_V2_MAX_HPACK_TABLE_SIZE;
++            } else {
++                h2c->max_hpack_table_size = value;
++            }
++
++            h2c->indicate_resize = 1;
++            break;
++
+         default:
+             break;
+         }
+diff --git a/src/http/v2/ngx_http_v2.h b/src/http/v2/ngx_http_v2.h
+index be34a093..cfd6d0ed 100644
+--- a/src/http/v2/ngx_http_v2.h
++++ b/src/http/v2/ngx_http_v2.h
+@@ -49,6 +49,13 @@
+ #define NGX_HTTP_V2_MAX_WINDOW           ((1U << 31) - 1)
+ #define NGX_HTTP_V2_DEFAULT_WINDOW       65535
+ 
++#define HPACK_ENC_HTABLE_SZ              128 /* better to keep a PoT < 64k */
++#define HPACK_ENC_HTABLE_ENTRIES         ((HPACK_ENC_HTABLE_SZ * 100) / 128)
++#define HPACK_ENC_DYNAMIC_KEY_TBL_SZ     10  /* 10 is sufficient for most */
++#define HPACK_ENC_MAX_ENTRY              512 /* longest header size to match */
++
++#define NGX_HTTP_V2_DEFAULT_HPACK_TABLE_SIZE     4096
++#define NGX_HTTP_V2_MAX_HPACK_TABLE_SIZE         16384 /* < 64k */
+ 
+ typedef struct ngx_http_v2_connection_s   ngx_http_v2_connection_t;
+ typedef struct ngx_http_v2_node_s         ngx_http_v2_node_t;
+@@ -110,6 +117,46 @@ typedef struct {
+ } ngx_http_v2_hpack_t;
+ 
+ 
++#if (NGX_HTTP_V2_HPACK_ENC)
++typedef struct {
++    uint64_t                         hash_val;
++    uint32_t                         index;
++    uint16_t                         pos;
++    uint16_t                         klen, vlen;
++    uint16_t                         size;
++    uint16_t                         next;
++} ngx_http_v2_hpack_enc_entry_t;
++
++
++typedef struct {
++    uint64_t                         hash_val;
++    uint32_t                         index;
++    uint16_t                         pos;
++    uint16_t                         klen;
++} ngx_http_v2_hpack_name_entry_t;
++
++
++typedef struct {
++    size_t                           size;    /* size as defined in RFC 7541 */
++    uint32_t                         top;     /* the last entry */
++    uint32_t                         pos;
++    uint16_t                         n_elems; /* number of elements */
++    uint16_t                         base;    /* index of the oldest entry */
++    uint16_t                         last;    /* index of the newest entry */
++
++    /* hash table for dynamic entries, instead using a generic hash table,
++       which would be too slow to process a significant amount of headers,
++       this table is not determenistic, and might ocasionally fail to insert
++       a value, at the cost of slightly worse compression, but significantly
++       faster performance */
++    ngx_http_v2_hpack_enc_entry_t    htable[HPACK_ENC_HTABLE_SZ];
++    ngx_http_v2_hpack_name_entry_t   heads[HPACK_ENC_DYNAMIC_KEY_TBL_SZ];
++    u_char                           storage[NGX_HTTP_V2_MAX_HPACK_TABLE_SIZE +
++                                             HPACK_ENC_MAX_ENTRY];
++} ngx_http_v2_hpack_enc_t;
++#endif
++
++
+ struct ngx_http_v2_connection_s {
+     ngx_connection_t                *connection;
+     ngx_http_connection_t           *http_connection;
+@@ -122,6 +169,8 @@ struct ngx_http_v2_connection_s {
+ 
+     size_t                           frame_size;
+ 
++    size_t                           max_hpack_table_size;
++
+     ngx_queue_t                      waiting;
+ 
+     ngx_http_v2_state_t              state;
+@@ -146,6 +195,11 @@ struct ngx_http_v2_connection_s {
+     unsigned                         settings_ack:1;
+     unsigned                         blocked:1;
+     unsigned                         goaway:1;
++    unsigned                         indicate_resize:1;
++
++#if (NGX_HTTP_V2_HPACK_ENC)
++    ngx_http_v2_hpack_enc_t          hpack_enc;
++#endif
+ };
+ 
+ 
+@@ -338,4 +392,31 @@ size_t ngx_http_v2_huff_encode(u_char *src, size_t len, u_char *dst,
+ 
+ #define ngx_http_v2_write_sid  ngx_http_v2_write_uint32
+ 
++u_char *ngx_http_v2_string_encode(u_char *dst, u_char *src, size_t len,
++    u_char *tmp, ngx_uint_t lower);
++
++u_char *
++ngx_http_v2_write_int(u_char *pos, ngx_uint_t prefix, ngx_uint_t value);
++
++#define ngx_http_v2_write_name(dst, src, len, tmp)                            \
++    ngx_http_v2_string_encode(dst, src, len, tmp, 1)
++#define ngx_http_v2_write_value(dst, src, len, tmp)                           \
++    ngx_http_v2_string_encode(dst, src, len, tmp, 0)
++
++u_char *
++ngx_http_v2_write_header(ngx_http_v2_connection_t *h2c, u_char *pos,
++    u_char *key, size_t key_len, u_char *value, size_t value_len,
++    u_char *tmp);
++
++void
++ngx_http_v2_table_resize(ngx_http_v2_connection_t *h2c);
++
++#define ngx_http_v2_write_header_str(key, value)                        \
++    ngx_http_v2_write_header(h2c, pos, (u_char *) key, sizeof(key) - 1, \
++    (u_char *) value, sizeof(value) - 1, tmp);
++
++#define ngx_http_v2_write_header_tbl(key, val)                          \
++    ngx_http_v2_write_header(h2c, pos, (u_char *) key, sizeof(key) - 1, \
++    val.data, val.len, tmp);
++
+ #endif /* _NGX_HTTP_V2_H_INCLUDED_ */
+diff --git a/src/http/v2/ngx_http_v2_filter_module.c b/src/http/v2/ngx_http_v2_filter_module.c
+index 7276531f..6bb33aa0 100644
+--- a/src/http/v2/ngx_http_v2_filter_module.c
++++ b/src/http/v2/ngx_http_v2_filter_module.c
+@@ -25,11 +25,6 @@
+ #define ngx_http_v2_indexed(i)      (128 + (i))
+ #define ngx_http_v2_inc_indexed(i)  (64 + (i))
+ 
+-#define ngx_http_v2_write_name(dst, src, len, tmp)                            \
+-    ngx_http_v2_string_encode(dst, src, len, tmp, 1)
+-#define ngx_http_v2_write_value(dst, src, len, tmp)                           \
+-    ngx_http_v2_string_encode(dst, src, len, tmp, 0)
+-
+ #define NGX_HTTP_V2_ENCODE_RAW            0
+ #define NGX_HTTP_V2_ENCODE_HUFF           0x80
+ 
+@@ -51,10 +46,6 @@
+ #define NGX_HTTP_V2_VARY_INDEX            59
+ 
+ 
+-static u_char *ngx_http_v2_string_encode(u_char *dst, u_char *src, size_t len,
+-    u_char *tmp, ngx_uint_t lower);
+-static u_char *ngx_http_v2_write_int(u_char *pos, ngx_uint_t prefix,
+-    ngx_uint_t value);
+ static ngx_http_v2_out_frame_t *ngx_http_v2_create_headers_frame(
+     ngx_http_request_t *r, u_char *pos, u_char *end);
+ 
+@@ -138,6 +129,7 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
+     ngx_http_core_loc_conf_t  *clcf;
+     ngx_http_core_srv_conf_t  *cscf;
+     u_char                     addr[NGX_SOCKADDR_STRLEN];
++    ngx_http_v2_connection_t  *h2c;
+ 
+     static const u_char nginx[5] = "\x84\xaa\x63\x55\xe7";
+ #if (NGX_HTTP_GZIP)
+@@ -146,11 +138,9 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
+ #endif
+ 
+     static size_t nginx_ver_len = ngx_http_v2_literal_size(NGINX_VER);
+-    static u_char nginx_ver[ngx_http_v2_literal_size(NGINX_VER)];
+ 
+     static size_t nginx_ver_build_len =
+                                   ngx_http_v2_literal_size(NGINX_VER_BUILD);
+-    static u_char nginx_ver_build[ngx_http_v2_literal_size(NGINX_VER_BUILD)];
+ 
+     if (!r->stream) {
+         return ngx_http_next_header_filter(r);
+@@ -411,7 +401,7 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
+     }
+ 
+     tmp = ngx_palloc(r->pool, tmp_len);
+-    pos = ngx_pnalloc(r->pool, len);
++    pos = ngx_pnalloc(r->pool, len + 15 + 1);
+ 
+     if (pos == NULL || tmp == NULL) {
+         return NGX_ERROR;
+@@ -419,6 +409,18 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
+ 
+     start = pos;
+ 
++    h2c = r->stream->connection;
++
++    if (h2c->indicate_resize) {
++        *pos = 32;
++        pos = ngx_http_v2_write_int(pos, ngx_http_v2_prefix(5),
++                                    h2c->max_hpack_table_size);
++        h2c->indicate_resize = 0;
++#if (NGX_HTTP_V2_HPACK_ENC)
++        ngx_http_v2_table_resize(h2c);
++#endif
++    }
++
+     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+                    "http2 output header: \":status: %03ui\"",
+                    r->headers_out.status);
+@@ -427,67 +429,28 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
+         *pos++ = status;
+ 
+     } else {
+-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_STATUS_INDEX);
+-        *pos++ = NGX_HTTP_V2_ENCODE_RAW | 3;
+-        pos = ngx_sprintf(pos, "%03ui", r->headers_out.status);
++        ngx_sprintf(pos + 8, "%O3ui", r->headers_out.status);
++        pos = ngx_http_v2_write_header(h2c, pos, (u_char *)":status",
++                                       sizeof(":status") - 1, pos + 8, 3, tmp);
+     }
+ 
+     if (r->headers_out.server == NULL) {
+-
+         if (clcf->server_tokens == NGX_HTTP_SERVER_TOKENS_ON) {
+-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                           "http2 output header: \"server: %s\"",
+-                           NGINX_VER);
+-
+-        } else if (clcf->server_tokens == NGX_HTTP_SERVER_TOKENS_BUILD) {
+-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                           "http2 output header: \"server: %s\"",
+-                           NGINX_VER_BUILD);
+-
+-        } else {
+-            ngx_log_debug0(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                           "http2 output header: \"server: nginx\"");
+-        }
+-
+-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_SERVER_INDEX);
+-
+-        if (clcf->server_tokens == NGX_HTTP_SERVER_TOKENS_ON) {
+-            if (nginx_ver[0] == '\0') {
+-                p = ngx_http_v2_write_value(nginx_ver, (u_char *) NGINX_VER,
+-                                            sizeof(NGINX_VER) - 1, tmp);
+-                nginx_ver_len = p - nginx_ver;
+-            }
+-
+-            pos = ngx_cpymem(pos, nginx_ver, nginx_ver_len);
++            pos = ngx_http_v2_write_header_str("server", NGINX_VER);
+ 
+         } else if (clcf->server_tokens == NGX_HTTP_SERVER_TOKENS_BUILD) {
+-            if (nginx_ver_build[0] == '\0') {
+-                p = ngx_http_v2_write_value(nginx_ver_build,
+-                                            (u_char *) NGINX_VER_BUILD,
+-                                            sizeof(NGINX_VER_BUILD) - 1, tmp);
+-                nginx_ver_build_len = p - nginx_ver_build;
+-            }
+-
+-            pos = ngx_cpymem(pos, nginx_ver_build, nginx_ver_build_len);
++            pos = ngx_http_v2_write_header_str("server", NGINX_VER_BUILD);
+ 
+         } else {
+-            pos = ngx_cpymem(pos, nginx, sizeof(nginx));
++            pos = ngx_http_v2_write_header_str("server", "nginx");
+         }
+     }
+ 
+     if (r->headers_out.date == NULL) {
+-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                       "http2 output header: \"date: %V\"",
+-                       &ngx_cached_http_time);
+-
+-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_DATE_INDEX);
+-        pos = ngx_http_v2_write_value(pos, ngx_cached_http_time.data,
+-                                      ngx_cached_http_time.len, tmp);
++        pos = ngx_http_v2_write_header_tbl("date", ngx_cached_http_time);
+     }
+ 
+     if (r->headers_out.content_type.len) {
+-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_CONTENT_TYPE_INDEX);
+-
+         if (r->headers_out.content_type_len == r->headers_out.content_type.len
+             && r->headers_out.charset.len)
+         {
+@@ -513,64 +476,36 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
+             r->headers_out.content_type.data = p - len;
+         }
+ 
+-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                       "http2 output header: \"content-type: %V\"",
+-                       &r->headers_out.content_type);
+-
+-        pos = ngx_http_v2_write_value(pos, r->headers_out.content_type.data,
+-                                      r->headers_out.content_type.len, tmp);
++        pos = ngx_http_v2_write_header_tbl("content-type",
++                                           r->headers_out.content_type);
+     }
+ 
+     if (r->headers_out.content_length == NULL
+         && r->headers_out.content_length_n >= 0)
+     {
+-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                       "http2 output header: \"content-length: %O\"",
+-                       r->headers_out.content_length_n);
+-
+-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_CONTENT_LENGTH_INDEX);
+-
+-        p = pos;
+-        pos = ngx_sprintf(pos + 1, "%O", r->headers_out.content_length_n);
+-        *p = NGX_HTTP_V2_ENCODE_RAW | (u_char) (pos - p - 1);
++        p = ngx_sprintf(pos + 15, "%O", r->headers_out.content_length_n);
++        pos = ngx_http_v2_write_header(h2c, pos, (u_char *)"content-length",
++                                       sizeof("content-length") - 1, pos + 15,
++                                       p - (pos + 15), tmp);
+     }
+ 
+     if (r->headers_out.last_modified == NULL
+         && r->headers_out.last_modified_time != -1)
+     {
+-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_LAST_MODIFIED_INDEX);
+-
+-        ngx_http_time(pos, r->headers_out.last_modified_time);
++        ngx_http_time(pos + 14, r->headers_out.last_modified_time);
+         len = sizeof("Wed, 31 Dec 1986 18:00:00 GMT") - 1;
+-
+-        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                       "http2 output header: \"last-modified: %*s\"",
+-                       len, pos);
+-
+-        /*
+-         * Date will always be encoded using huffman in the temporary buffer,
+-         * so it's safe here to use src and dst pointing to the same address.
+-         */
+-        pos = ngx_http_v2_write_value(pos, pos, len, tmp);
++        pos = ngx_http_v2_write_header(h2c, pos, (u_char *)"last-modified",
++                                       sizeof("last-modified") - 1, pos + 14,
++                                       len, tmp);
+     }
+ 
+     if (r->headers_out.location && r->headers_out.location->value.len) {
+-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                       "http2 output header: \"location: %V\"",
+-                       &r->headers_out.location->value);
+-
+-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_LOCATION_INDEX);
+-        pos = ngx_http_v2_write_value(pos, r->headers_out.location->value.data,
+-                                      r->headers_out.location->value.len, tmp);
++        pos = ngx_http_v2_write_header_tbl("location", r->headers_out.location->value);
+     }
+ 
+ #if (NGX_HTTP_GZIP)
+     if (r->gzip_vary) {
+-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                       "http2 output header: \"vary: Accept-Encoding\"");
+-
+-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_VARY_INDEX);
+-        pos = ngx_cpymem(pos, accept_encoding, sizeof(accept_encoding));
++        pos = ngx_http_v2_write_header_str("vary", "Accept-Encoding");
+     }
+ #endif
+ 
+@@ -593,23 +528,10 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
+             continue;
+         }
+ 
+-#if (NGX_DEBUG)
+-        if (fc->log->log_level & NGX_LOG_DEBUG_HTTP) {
+-            ngx_strlow(tmp, header[i].key.data, header[i].key.len);
+-
+-            ngx_log_debug3(NGX_LOG_DEBUG_HTTP, fc->log, 0,
+-                           "http2 output header: \"%*s: %V\"",
+-                           header[i].key.len, tmp, &header[i].value);
+-        }
+-#endif
+-
+-        *pos++ = 0;
+-
+-        pos = ngx_http_v2_write_name(pos, header[i].key.data,
+-                                     header[i].key.len, tmp);
++        pos = ngx_http_v2_write_header(h2c, pos, header[i].key.data,
++                                       header[i].key.len, header[i].value.data,
++                                       header[i].value.len, tmp);
+ 
+-        pos = ngx_http_v2_write_value(pos, header[i].value.data,
+-                                      header[i].value.len, tmp);
+     }
+ 
+     frame = ngx_http_v2_create_headers_frame(r, start, pos);
+@@ -636,7 +558,7 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
+ }
+ 
+ 
+-static u_char *
++u_char *
+ ngx_http_v2_string_encode(u_char *dst, u_char *src, size_t len, u_char *tmp,
+     ngx_uint_t lower)
+ {
+@@ -662,7 +584,7 @@ ngx_http_v2_string_encode(u_char *dst, u_char *src, size_t len, u_char *tmp,
+ }
+ 
+ 
+-static u_char *
++u_char *
+ ngx_http_v2_write_int(u_char *pos, ngx_uint_t prefix, ngx_uint_t value)
+ {
+     if (value < prefix) {
+diff --git a/src/http/v2/ngx_http_v2_table.c b/src/http/v2/ngx_http_v2_table.c
+index a73748a9..ed64d406 100644
+--- a/src/http/v2/ngx_http_v2_table.c
++++ b/src/http/v2/ngx_http_v2_table.c
+@@ -347,3 +347,434 @@ ngx_http_v2_table_size(ngx_http_v2_connection_t *h2c, size_t size)
+ 
+     return NGX_OK;
+ }
++
++
++#if (NGX_HTTP_V2_HPACK_ENC)
++
++static ngx_int_t
++hpack_get_static_index(ngx_http_v2_connection_t *h2c, u_char *val, size_t len);
++
++static ngx_int_t
++hpack_get_dynamic_index(ngx_http_v2_connection_t *h2c, uint64_t key_hash,
++                        uint8_t *key, size_t key_len);
++
++
++void
++ngx_http_v2_table_resize(ngx_http_v2_connection_t *h2c)
++{
++    ngx_http_v2_hpack_enc_entry_t  *table;
++    uint64_t                        idx;
++
++    table = h2c->hpack_enc.htable;
++
++    while (h2c->hpack_enc.size > h2c->max_hpack_table_size) {
++        idx = h2c->hpack_enc.base;
++        h2c->hpack_enc.base = table[idx].next;
++        h2c->hpack_enc.size -= table[idx].size;
++        table[idx].hash_val = 0;
++        h2c->hpack_enc.n_elems--;
++    }
++}
++
++
++/* checks if a header is in the hpack table - if so returns the table entry,
++   otherwise encodes and inserts into the table and returns 0,
++   if failed to insert into table, returns -1 */
++static ngx_int_t
++ngx_http_v2_table_encode_strings(ngx_http_v2_connection_t *h2c,
++    size_t key_len, size_t val_len, uint8_t *key, uint8_t *val,
++    ngx_int_t *header_idx)
++{
++    uint64_t  hash_val, key_hash, idx, lru;
++    int       i;
++    size_t    size = key_len + val_len + 32;
++    uint8_t  *storage = h2c->hpack_enc.storage;
++
++    ngx_http_v2_hpack_enc_entry_t   *table;
++    ngx_http_v2_hpack_name_entry_t  *name;
++
++    *header_idx = NGX_ERROR;
++    /* step 1: compute the hash value of header */
++    if (size > HPACK_ENC_MAX_ENTRY || size > h2c->max_hpack_table_size) {
++        return NGX_ERROR;
++    }
++
++    key_hash = ngx_murmur_hash2_64(key, key_len, 0x01234);
++    hash_val = ngx_murmur_hash2_64(val, val_len, key_hash);
++
++    if (hash_val == 0) {
++        return NGX_ERROR;
++    }
++
++    /* step 2: check if full header in the table */
++    idx = hash_val;
++    i = -1;
++    while (idx) {
++         /* at most 8 locations are checked, but most will be done in 1 or 2 */
++        table = &h2c->hpack_enc.htable[idx % HPACK_ENC_HTABLE_SZ];
++        if (table->hash_val == hash_val
++            && table->klen == key_len
++            && table->vlen == val_len
++            && ngx_memcmp(key, storage + table->pos, key_len) == 0
++            && ngx_memcmp(val, storage + table->pos + key_len, val_len) == 0)
++        {
++            return (h2c->hpack_enc.top - table->index) + 61;
++        }
++
++        if (table->hash_val == 0 && i == -1) {
++            i = idx % HPACK_ENC_HTABLE_SZ;
++            break;
++        }
++
++        idx >>= 8;
++    }
++
++    /* step 3: check if key is in one of the tables */
++    *header_idx = hpack_get_static_index(h2c, key, key_len);
++
++    if (i == -1) {
++        return NGX_ERROR;
++    }
++
++    if (*header_idx == NGX_ERROR) {
++        *header_idx = hpack_get_dynamic_index(h2c, key_hash, key, key_len);
++    }
++
++    /* step 4: store the new entry */
++    table =  h2c->hpack_enc.htable;
++
++    if (h2c->hpack_enc.top == 0xffffffff) {
++        /* just to be on the safe side, avoid overflow */
++        ngx_memset(&h2c->hpack_enc, 0, sizeof(ngx_http_v2_hpack_enc_t));
++    }
++
++    while ((h2c->hpack_enc.size + size > h2c->max_hpack_table_size)
++           || h2c->hpack_enc.n_elems == HPACK_ENC_HTABLE_ENTRIES) {
++        /* make space for the new entry first */
++        idx = h2c->hpack_enc.base;
++        h2c->hpack_enc.base = table[idx].next;
++        h2c->hpack_enc.size -= table[idx].size;
++        table[idx].hash_val = 0;
++        h2c->hpack_enc.n_elems--;
++    }
++
++    table[i] = (ngx_http_v2_hpack_enc_entry_t){.hash_val = hash_val,
++                                               .index = h2c->hpack_enc.top,
++                                               .pos = h2c->hpack_enc.pos,
++                                               .klen = key_len,
++                                               .vlen = val_len,
++                                               .size = size,
++                                               .next = 0};
++
++    table[h2c->hpack_enc.last].next = i;
++    if (h2c->hpack_enc.n_elems == 0) {
++        h2c->hpack_enc.base = i;
++    }
++
++    h2c->hpack_enc.last = i;
++    h2c->hpack_enc.top++;
++    h2c->hpack_enc.size += size;
++    h2c->hpack_enc.n_elems++;
++
++    /* update header name lookup */
++    if (*header_idx == NGX_ERROR ) {
++        lru = h2c->hpack_enc.top;
++
++        for (i=0; i<HPACK_ENC_DYNAMIC_KEY_TBL_SZ; i++) {
++
++            name = &h2c->hpack_enc.heads[i];
++
++            if ( name->hash_val == 0 || (name->hash_val == key_hash
++                && ngx_memcmp(storage + name->pos, key, key_len) == 0) )
++            {
++                name->hash_val = key_hash;
++                name->pos = h2c->hpack_enc.pos;
++                name->index = h2c->hpack_enc.top - 1;
++                break;
++            }
++
++            if (lru > name->index) {
++                lru = name->index;
++                idx = i;
++            }
++        }
++
++        if (i == HPACK_ENC_DYNAMIC_KEY_TBL_SZ) {
++            name = &h2c->hpack_enc.heads[idx];
++            name->hash_val = hash_val;
++            name->pos = h2c->hpack_enc.pos;
++            name->index = h2c->hpack_enc.top - 1;
++        }
++    }
++
++    ngx_memcpy(storage + h2c->hpack_enc.pos, key, key_len);
++    ngx_memcpy(storage + h2c->hpack_enc.pos + key_len, val, val_len);
++
++    h2c->hpack_enc.pos += size;
++    if (h2c->hpack_enc.pos > NGX_HTTP_V2_MAX_HPACK_TABLE_SIZE) {
++        h2c->hpack_enc.pos = 0;
++    }
++
++    return NGX_OK;
++}
++
++
++u_char *
++ngx_http_v2_write_header(ngx_http_v2_connection_t *h2c, u_char *pos,
++                         u_char *key, size_t key_len,
++                         u_char *value, size_t value_len,
++                         u_char *tmp)
++{
++    ngx_int_t idx, header_idx;
++
++    ngx_log_debug4(NGX_LOG_DEBUG_HTTP, h2c->connection->log, 0,
++                   "http2 output header: %*s: %*s", key_len, key, value_len,
++                   value);
++
++    /* attempt to find the value in the dynamic table */
++    idx = ngx_http_v2_table_encode_strings(h2c, key_len, value_len, key, value,
++                                           &header_idx);
++
++    if (idx > 0) {
++        /* positive index indicates success */
++        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, h2c->connection->log, 0,
++                       "http2 hpack encode: Indexed Header Field: %ud", idx);
++
++        *pos = 128;
++        pos = ngx_http_v2_write_int(pos, ngx_http_v2_prefix(7), idx);
++
++    } else {
++
++        if (header_idx == NGX_ERROR) { /* if key is not present */
++
++            if (idx == NGX_ERROR) {    /* if header was not added */
++                *pos++ = 0;
++
++                ngx_log_debug0(NGX_LOG_DEBUG_HTTP, h2c->connection->log, 0,
++                              "http2 hpack encode: Literal Header Field without"
++                              " Indexing — New Name");
++            } else {                   /* if header was added */
++                *pos++ = 64;
++
++                ngx_log_debug0(NGX_LOG_DEBUG_HTTP, h2c->connection->log, 0,
++                              "http2 hpack encode: Literal Header Field with "
++                              "Incremental Indexing — New Name");
++            }
++
++            pos = ngx_http_v2_write_name(pos, key, key_len, tmp);
++
++        } else {                       /* if key is present */
++
++            if (idx == NGX_ERROR) {
++                *pos = 0;
++                pos = ngx_http_v2_write_int(pos, ngx_http_v2_prefix(4), header_idx);
++
++                ngx_log_debug1(NGX_LOG_DEBUG_HTTP, h2c->connection->log, 0,
++                              "http2 hpack encode: Literal Header Field without"
++                              " Indexing — Indexed Name: %ud", header_idx);
++            } else {
++                *pos = 64;
++                pos = ngx_http_v2_write_int(pos, ngx_http_v2_prefix(6), header_idx);
++
++                ngx_log_debug1(NGX_LOG_DEBUG_HTTP, h2c->connection->log, 0,
++                              "http2 hpack encode: Literal Header Field with "
++                              "Incremental Indexing — Indexed Name: %ud", header_idx);
++            }
++        }
++
++        pos = ngx_http_v2_write_value(pos, value, value_len, tmp);
++    }
++
++    return pos;
++}
++
++
++static ngx_int_t
++hpack_get_dynamic_index(ngx_http_v2_connection_t *h2c, uint64_t key_hash,
++                        uint8_t *key, size_t key_len)
++{
++    ngx_http_v2_hpack_name_entry_t  *name;
++    int                              i;
++
++    for (i=0; i<HPACK_ENC_DYNAMIC_KEY_TBL_SZ; i++) {
++        name = &h2c->hpack_enc.heads[i];
++
++        if (name->hash_val == key_hash
++            && ngx_memcmp(h2c->hpack_enc.storage + name->pos, key, key_len) == 0)
++        {
++            if (name->index >= h2c->hpack_enc.top - h2c->hpack_enc.n_elems) {
++                return (h2c->hpack_enc.top - name->index) + 61;
++            }
++            break;
++        }
++    }
++
++    return NGX_ERROR;
++}
++
++
++/* decide if a given header is present in the static dictionary, this could be
++   done in several ways, but it seems the fastest one is "exhaustive" search */
++static ngx_int_t
++hpack_get_static_index(ngx_http_v2_connection_t *h2c, u_char *val, size_t len)
++{
++    /* the static dictionary of response only headers,
++       although response headers can be put by origin,
++       that would be rare */
++    static const struct {
++        u_char         len;
++        const u_char   val[28];
++        u_char         idx;
++    } server_headers[] = {
++        { 3, "age",                         21},//0
++        { 3, "via",                         60},
++        { 4, "date",                        33},//2
++        { 4, "etag",                        34},
++        { 4, "link",                        45},
++        { 4, "vary",                        59},
++        { 5, "allow",                       22},//6
++        { 6, "server",                      54},//7
++        { 7, "expires",                     36},//8
++        { 7, "refresh",                     52},
++        { 8, "location",                    46},//10
++        {10, "set-cookie",                  55},//11
++        {11, "retry-after",                 53},//12
++        {12, "content-type",                31},//13
++        {13, "content-range",               30},//14
++        {13, "accept-ranges",               18},
++        {13, "cache-control",               24},
++        {13, "last-modified",               44},
++        {14, "content-length",              28},//18
++        {16, "content-encoding",            26},//19
++        {16, "content-language",            27},
++        {16, "content-location",            29},
++        {16, "www-authenticate",            61},
++        {17, "transfer-encoding",           57},//23
++        {18, "proxy-authenticate",          48},//24
++        {19, "content-disposition",         25},//25
++        {25, "strict-transport-security",   56},//26
++        {27, "access-control-allow-origin", 20},//27
++        {99, "",                            99},
++    }, *header;
++
++    /* for a given length, where to start the search
++       since minimal length is 3, the table has a -3
++       offset */
++    static const int8_t start_at[] = {
++        [3-3]  = 0,
++        [4-3]  = 2,
++        [5-3]  = 6,
++        [6-3]  = 7,
++        [7-3]  = 8,
++        [8-3]  = 10,
++        [9-3]  = -1,
++        [10-3] = 11,
++        [11-3] = 12,
++        [12-3] = 13,
++        [13-3] = 14,
++        [14-3] = 18,
++        [15-3] = -1,
++        [16-3] = 19,
++        [17-3] = 23,
++        [18-3] = 24,
++        [19-3] = 25,
++        [20-3] = -1,
++        [21-3] = -1,
++        [22-3] = -1,
++        [23-3] = -1,
++        [24-3] = -1,
++        [25-3] = 26,
++        [26-3] = -1,
++        [27-3] = 27,
++    };
++
++    uint64_t pref;
++    size_t   save_len = len, i;
++    int8_t   start;
++
++    /* early exit for out of bounds lengths */
++    if (len < 3 || len > 27) {
++        return NGX_ERROR;
++    }
++
++    start = start_at[len - 3];
++    if (start == -1) {
++        /* exit for non existent lengths */
++        return NGX_ERROR;
++    }
++
++    header = &server_headers[start_at[len - 3]];
++
++    /* load first 8 bytes of key, for fast comparison */
++    if (len < 8) {
++        pref = 0;
++        if (len >= 4) {
++            pref = *(uint32_t *)(val + len - 4) | 0x20202020;
++            len -= 4;
++        }
++        while (len > 0) { /* 3 iterations at most */
++            pref = (pref << 8) ^ (val[len - 1] | 0x20);
++            len--;
++        }
++    } else {
++        pref = *(uint64_t *)val | 0x2020202020202020;
++        len -= 8;
++    }
++
++    /* iterate over headers with the right length */
++    while (header->len == save_len) {
++        /* quickly compare the first 8 bytes, most tests will end here */
++        if (pref != *(uint64_t *) header->val) {
++            header++;
++            continue;
++        }
++
++        if (len == 0) {
++            /* len == 0, indicates prefix held the entire key */
++            return header->idx;
++        }
++        /* for longer keys compare the rest */
++        i = 1 + (save_len + 7) % 8; /* align so we can compare in quadwords */
++
++        while (i + 8 <= save_len) { /* 3 iterations at most */
++            if ( *(uint64_t *)&header->val[i]
++                 != (*(uint64_t *) &val[i]| 0x2020202020202020) )
++            {
++                header++;
++                i = 0;
++                break;
++            }
++            i += 8;
++        }
++
++        if (i == 0) {
++            continue;
++        }
++
++        /* found the corresponding entry in the static dictionary */
++        return header->idx;
++    }
++
++    return NGX_ERROR;
++}
++
++#else
++
++u_char *
++ngx_http_v2_write_header(ngx_http_v2_connection_t *h2c, u_char *pos,
++                         u_char *key, size_t key_len,
++                         u_char *value, size_t value_len,
++                         u_char *tmp)
++{
++    ngx_log_debug4(NGX_LOG_DEBUG_HTTP, h2c->connection->log, 0,
++                   "http2 output header: %*s: %*s", key_len, key, value_len,
++                   value);
++
++    *pos++ = 64;
++    pos = ngx_http_v2_write_name(pos, key, key_len, tmp);
++    pos = ngx_http_v2_write_value(pos, value, value_len, tmp);
++
++    return pos;
++}
++
++#endif
+-- 
+2.11.0 (Apple Git-81)
+

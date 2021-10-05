@@ -1,0 +1,93 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: authenticate
+  namespace: '199012542667'
+  selfLink: /apis/serving.knative.dev/v1/namespaces/199012542667/services/authenticate
+  uid: 28e99ed0-f583-4502-86db-092e60ac3985
+  resourceVersion: AAXARfZIxAU
+  generation: 19
+  creationTimestamp: '2020-12-28T08:30:23.698712Z'
+  labels:
+    managed-by: gcp-cloud-build-deploy-cloud-run
+    gcb-trigger-id: 7db3591a-6d1c-43d9-95c4-2076a62c0f16
+    commit-sha: d042998f6a7d413d480a5d44e16b9a35866e4bd6
+    gcb-build-id: 5dd5b778-8afc-4160-8c60-697c8aa4280b
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    run.googleapis.com/client-name: cloud-console
+    serving.knative.dev/creator: shannonmae@aprnhome.com
+    serving.knative.dev/lastModifier: shannonmae@aprnhome.com
+    client.knative.dev/user-image: us.gcr.io/med-home-apis-work/hello-world-1/iap-gcip-hosted-ui-default@sha256:4f29e4defb7265458adc5ab26c251b889000f3e840991125521e7f6f68d76b52
+    run.googleapis.com/ingress: internal-and-cloud-load-balancing
+    run.googleapis.com/ingress-status: internal-and-cloud-load-balancing
+spec:
+  template:
+    metadata:
+      name: authenticate-00019-buy
+      labels:
+        managed-by: gcp-cloud-build-deploy-cloud-run
+        gcb-trigger-id: aa2d763a-a445-44bf-b5d9-e77839847dd3
+        commit-sha: d042998f6a7d413d480a5d44e16b9a35866e4bd6
+        gcb-build-id: 5dd5b778-8afc-4160-8c60-697c8aa4280b
+      annotations:
+        run.googleapis.com/client-name: cloud-console
+        client.knative.dev/user-image: us.gcr.io/med-home-apis-work/hello-world-1/iap-gcip-hosted-ui-default@sha256:4f29e4defb7265458adc5ab26c251b889000f3e840991125521e7f6f68d76b52
+        run.googleapis.com/vpc-access-egress: all
+        run.googleapis.com/cloudsql-instances: med-home-apis-work:us-central1:wordpress-1-vm-replica
+        autoscaling.knative.dev/maxScale: '100'
+        run.googleapis.com/sandbox: gvisor
+        run.googleapis.com/vpc-access-connector: projects/med-home-apis-work/locations/us-central1/connectors/googleapis-workspace
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      serviceAccountName: 199012542667-compute@developer.gserviceaccount.com
+      containers:
+      - image: us.gcr.io/med-home-apis-work/hello-world-1/iap-gcip-hosted-ui-default@sha256:4f29e4defb7265458adc5ab26c251b889000f3e840991125521e7f6f68d76b52
+        args:
+        - gcloud
+        ports:
+        - name: h2c
+          containerPort: 8080
+        env:
+        - name: GOOGW2A564BY4UMR6RQZOCYH
+          value: Eu3K32GxrQW1BiE1Jyn1jcYjyeLn06oeUS+hUAEl
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 256Mi
+  traffic:
+  - revisionName: authenticate-00016-pal
+    tag: aprnhome
+  - tag: medhome
+    latestRevision: true
+  - percent: 100
+    latestRevision: true
+status:
+  observedGeneration: 19
+  conditions:
+  - type: Ready
+    status: 'True'
+    lastTransitionTime: '2021-04-01T19:39:11.939821Z'
+  - type: ConfigurationsReady
+    status: 'True'
+    lastTransitionTime: '2021-04-01T19:39:04.850301Z'
+  - type: RoutesReady
+    status: 'True'
+    lastTransitionTime: '2021-04-01T19:39:11.939821Z'
+  latestReadyRevisionName: authenticate-00019-buy
+  latestCreatedRevisionName: authenticate-00019-buy
+  traffic:
+  - revisionName: authenticate-00016-pal
+    tag: aprnhome
+    url: https://aprnhome---authenticate-omojmt3n2q-uc.a.run.app
+  - revisionName: authenticate-00019-buy
+    tag: medhome
+    latestRevision: true
+    url: https://medhome---authenticate-omojmt3n2q-uc.a.run.app
+  - revisionName: authenticate-00019-buy
+    percent: 100
+    latestRevision: true
+  url: https://authenticate-omojmt3n2q-uc.a.run.app
+  address:
+    url: https://authenticate-omojmt3n2q-uc.a.run.app

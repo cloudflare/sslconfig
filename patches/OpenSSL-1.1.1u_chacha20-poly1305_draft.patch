@@ -1,0 +1,571 @@
+diff -u a/crypto/evp/c_allc.c b/crypto/evp/c_allc.c
+--- a/crypto/evp/c_allc.c
++++ b/crypto/evp/c_allc.c
+@@ -261,6 +261,7 @@ void openssl_add_all_ciphers_int(void)
+     EVP_add_cipher(EVP_chacha20());
+ # ifndef OPENSSL_NO_POLY1305
+     EVP_add_cipher(EVP_chacha20_poly1305());
++    EVP_add_cipher(EVP_chacha20_poly1305_draft());
+ # endif
+ #endif
+ }
+diff -u -r a/test/cipherlist_test.c b/test/cipherlist_test.c
+--- a/test/cipherlist_test.c
++++ b/test/cipherlist_test.c
+@@ -82,10 +82,13 @@
+ # if !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305)
+ #  ifndef OPENSSL_NO_EC
+     TLS1_CK_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
++    TLS1_CK_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_D,
+     TLS1_CK_ECDHE_RSA_WITH_CHACHA20_POLY1305,
++    TLS1_CK_ECDHE_RSA_WITH_CHACHA20_POLY1305_D,
+ #  endif
+ #  ifndef OPENSSL_NO_DH
+     TLS1_CK_DHE_RSA_WITH_CHACHA20_POLY1305,
++    TLS1_CK_DHE_RSA_WITH_CHACHA20_POLY1305_D,
+ #  endif
+ # endif  /* !OPENSSL_NO_CHACHA && !OPENSSL_NO_POLY1305 */
+
+diff -u -r a/test/ciphername_test.c b/test/ciphername_test.c
+--- a/test/ciphername_test.c
++++ b/test/ciphername_test.c
+@@ -350,8 +350,11 @@
+     {0xC0AE, "TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8"},
+     {0xC0AF, "TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8"},
+     {0xCCA8, "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"},
++    {0xCC13, "OLD_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"},
+     {0xCCA9, "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"},
++    {0xCC14, "OLD_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"},
+     {0xCCAA, "TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256"},
++    {0xCC15, "OLD_TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256"},
+     {0xCCAB, "TLS_PSK_WITH_CHACHA20_POLY1305_SHA256"},
+     {0xCCAC, "TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256"},
+     {0xCCAD, "TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256"},
+
+diff -u a/crypto/evp/e_chacha20_poly1305.c b/crypto/evp/e_chacha20_poly1305.c
+--- a/crypto/evp/e_chacha20_poly1305.c
++++ b/crypto/evp/e_chacha20_poly1305.c
+@@ -633,5 +633,244 @@
+ {
+     return(&chacha20_poly1305);
+ }
++
++static int chacha20_poly1305_draft_init_key(EVP_CIPHER_CTX *ctx,
++                                            const unsigned char *inkey,
++                                            const unsigned char *iv, int enc)
++{
++    EVP_CHACHA_AEAD_CTX *actx = aead_data(ctx);
++
++    if (!inkey)
++        return 1;
++
++    actx->len.aad = 0;
++    actx->len.text = 0;
++    actx->aad = 0;
++    actx->mac_inited = 0;
++    actx->tls_payload_length = NO_TLS_PAYLOAD_LENGTH;
++
++
++    chacha_init_key(ctx, inkey, NULL, enc);
++
++    return 1;
++}
++
++static int chacha20_poly1305_draft_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
++                                          const unsigned char *in, size_t len)
++{
++    EVP_CHACHA_AEAD_CTX *actx = aead_data(ctx);
++    size_t plen = actx->tls_payload_length;
++    uint64_t thirteen = EVP_AEAD_TLS1_AAD_LEN;
++
++    if (!actx->mac_inited) {
++        actx->key.counter[0] = 0;
++        ChaCha20_ctr32(actx->key.buf, zero, CHACHA_BLK_SIZE,
++                       actx->key.key.d, actx->key.counter);
++        Poly1305_Init(POLY1305_ctx(actx), actx->key.buf);
++        actx->key.counter[0] = 1;
++        actx->key.partial_len = 0;
++        actx->len.aad = actx->len.text = 0;
++        actx->mac_inited = 1;
++        if (plen != NO_TLS_PAYLOAD_LENGTH) {
++            Poly1305_Update(POLY1305_ctx(actx), actx->tls_aad,
++                            EVP_AEAD_TLS1_AAD_LEN);
++            actx->len.aad = EVP_AEAD_TLS1_AAD_LEN;
++            actx->aad = 1;
++        }
++    }
++
++    if (in) {                                   /* aad or text */
++        if (out == NULL) {                      /* aad */
++            Poly1305_Update(POLY1305_ctx(actx), in, len);
++            actx->len.aad += len;
++            actx->aad = 1;
++            return len;
++        } else {                                /* plain- or ciphertext */
++            if (actx->aad) {                    /* wrap up aad */
++                thirteen = actx->len.aad;
++                    Poly1305_Update(POLY1305_ctx(actx), (const unsigned char *)&thirteen,
++                                    sizeof(thirteen));
++                actx->aad = 0;
++            }
++
++            actx->tls_payload_length = NO_TLS_PAYLOAD_LENGTH;
++            if (plen == NO_TLS_PAYLOAD_LENGTH)
++                plen = len;
++            else if (len != plen + POLY1305_BLOCK_SIZE)
++                return -1;
++
++            if (ctx->encrypt) {                 /* plaintext */
++                chacha_cipher(ctx, out, in, plen);
++                Poly1305_Update(POLY1305_ctx(actx), out, plen);
++                in += plen;
++                out += plen;
++                actx->len.text += plen;
++            } else {                            /* ciphertext */
++                Poly1305_Update(POLY1305_ctx(actx), in, plen);
++                chacha_cipher(ctx, out, in, plen);
++                in += plen;
++                out += plen;
++                actx->len.text += plen;
++            }
++        }
++    }
++    if (in == NULL                              /* explicit final */
++        || plen != len) {                       /* or tls mode */
++
++        if (actx->aad) {                        /* wrap up aad */
++            thirteen = actx->len.aad;
++                Poly1305_Update(POLY1305_ctx(actx), (const unsigned char *)&thirteen,
++                                sizeof(thirteen));
++            actx->aad = 0;
++        }
++
++        thirteen = actx->len.text;
++            Poly1305_Update(POLY1305_ctx(actx), (const unsigned char *)&thirteen, sizeof(thirteen));
++
++        unsigned char temp[POLY1305_BLOCK_SIZE];
++        Poly1305_Final(POLY1305_ctx(actx), ctx->encrypt ? actx->tag
++                                                        : temp);
++        actx->mac_inited = 0;
++
++        if (in != NULL && len != plen) {        /* tls mode */
++            if (ctx->encrypt) {
++                memcpy(out, actx->tag, POLY1305_BLOCK_SIZE);
++            } else {
++                if (CRYPTO_memcmp(temp, in, POLY1305_BLOCK_SIZE)) {
++                    memset(out - plen, 0, plen);
++                    return -1;
++                }
++            }
++        }
++        else if (!ctx->encrypt) {
++            if (CRYPTO_memcmp(temp, actx->tag, actx->tag_len))
++                return -1;
++        }
++    }
++    return len;
++}
++
++static int chacha20_poly1305_draft_cleanup(EVP_CIPHER_CTX *ctx)
++{
++    EVP_CHACHA_AEAD_CTX *actx = aead_data(ctx);
++    if (actx)
++        OPENSSL_cleanse(ctx->cipher_data, sizeof(*actx) + Poly1305_ctx_size());
++    return 1;
++}
++
++static int chacha20_poly1305_draft_ctrl(EVP_CIPHER_CTX *ctx, int type, int arg,
++                                        void *ptr)
++{
++    EVP_CHACHA_AEAD_CTX *actx = aead_data(ctx);
++
++    switch (type) {
++    case EVP_CTRL_INIT:
++        if (actx == NULL)
++            actx = ctx->cipher_data
++                 = OPENSSL_zalloc(sizeof(*actx) + Poly1305_ctx_size());
++        if (actx == NULL) {
++            EVPerr(EVP_F_CHACHA20_POLY1305_CTRL, EVP_R_INITIALIZATION_ERROR);
++            return 0;
++        }
++        actx->len.aad = 0;
++        actx->len.text = 0;
++        actx->aad = 0;
++        actx->mac_inited = 0;
++        actx->tag_len = 0;
++        actx->nonce_len = 12;
++        actx->tls_payload_length = NO_TLS_PAYLOAD_LENGTH;
++        memset(actx->tls_aad, 0, POLY1305_BLOCK_SIZE);
++        return 1;
++
++    case EVP_CTRL_COPY:
++        if (actx) {
++            EVP_CIPHER_CTX *dst = (EVP_CIPHER_CTX *)ptr;
++
++            dst->cipher_data =
++                   OPENSSL_memdup(actx, sizeof(*actx) + Poly1305_ctx_size());
++            if (dst->cipher_data == NULL) {
++                EVPerr(EVP_F_CHACHA20_POLY1305_CTRL, EVP_R_COPY_ERROR);
++                return 0;
++            }
++        }
++        return 1;
++
++    case EVP_CTRL_AEAD_SET_TAG:
++        if (arg <= 0 || arg > POLY1305_BLOCK_SIZE)
++            return 0;
++        if (ptr != NULL) {
++            memcpy(actx->tag, ptr, arg);
++            actx->tag_len = arg;
++        }
++        return 1;
++
++    case EVP_CTRL_AEAD_GET_TAG:
++        if (arg <= 0 || arg > POLY1305_BLOCK_SIZE || !ctx->encrypt)
++            return 0;
++        memcpy(ptr, actx->tag, arg);
++        return 1;
++
++    case EVP_CTRL_AEAD_TLS1_AAD:
++        if (arg != EVP_AEAD_TLS1_AAD_LEN)
++            return 0;
++        {
++            unsigned int len;
++            unsigned char *aad = ptr;
++
++            memcpy(actx->tls_aad, ptr, EVP_AEAD_TLS1_AAD_LEN);
++            len = aad[EVP_AEAD_TLS1_AAD_LEN - 2] << 8 |
++                  aad[EVP_AEAD_TLS1_AAD_LEN - 1];
++            aad = actx->tls_aad;
++            if (!ctx->encrypt) {
++                if (len < POLY1305_BLOCK_SIZE)
++                    return 0;
++                len -= POLY1305_BLOCK_SIZE;     /* discount attached tag */
++                aad[EVP_AEAD_TLS1_AAD_LEN - 2] = (unsigned char)(len >> 8);
++                aad[EVP_AEAD_TLS1_AAD_LEN - 1] = (unsigned char)len;
++            }
++            actx->tls_payload_length = len;
++
++            /*
++             * merge record sequence number as chacha-draft
++             */
++            actx->key.counter[1] = 0;
++            actx->key.counter[2] = CHACHA_U8TOU32(aad);
++            actx->key.counter[3] = CHACHA_U8TOU32(aad + 4);
++            actx->mac_inited = 0;
++
++            return POLY1305_BLOCK_SIZE;         /* tag length */
++        }
++
++    case EVP_CTRL_AEAD_SET_MAC_KEY:
++        /* no-op */
++        return 1;
++
++    default:
++        return -1;
++    }
++}
++static EVP_CIPHER chacha20_poly1305_draft = {
++    NID_chacha20_poly1305_draft,
++    1,                  /* block_size */
++    CHACHA_KEY_SIZE,    /* key_len */
++    0,                  /* iv_len, none */
++    EVP_CIPH_FLAG_AEAD_CIPHER | EVP_CIPH_CUSTOM_IV |
++    EVP_CIPH_ALWAYS_CALL_INIT | EVP_CIPH_CTRL_INIT |
++    EVP_CIPH_CUSTOM_COPY | EVP_CIPH_FLAG_CUSTOM_CIPHER,
++    chacha20_poly1305_draft_init_key,
++    chacha20_poly1305_draft_cipher,
++    chacha20_poly1305_draft_cleanup,
++    0,          /* 0 moves context-specific structure allocation to ctrl */
++    NULL,       /* set_asn1_parameters */
++    NULL,       /* get_asn1_parameters */
++    chacha20_poly1305_draft_ctrl,
++    NULL        /* app_data */
++};
++
++const EVP_CIPHER *EVP_chacha20_poly1305_draft(void)
++{
++    return(&chacha20_poly1305_draft);
++}
+ # endif
++
+ #endif
+diff -u a/crypto/objects/obj_dat.h b/crypto/objects/obj_dat.h
+--- a/crypto/objects/obj_dat.h
++++ b/crypto/objects/obj_dat.h
+@@ -1078,7 +1078,7 @@ static const unsigned char so[7762] = {
+     0x2A,0x86,0x48,0x86,0xF7,0x0D,0x02,0x0D,       /* [ 7753] OBJ_hmacWithSHA512_256 */
+ };
+ 
+-#define NUM_NID 1195
++#define NUM_NID 1196
+ static const ASN1_OBJECT nid_objs[NUM_NID] = {
+     {"UNDEF", "undefined", NID_undef},
+     {"rsadsi", "RSA Data Security, Inc.", NID_rsadsi, 6, &so[0]},
+@@ -2275,9 +2275,10 @@ static const ASN1_OBJECT nid_objs[NUM_NID] = {
+     {"magma-mac", "magma-mac", NID_magma_mac},
+     {"hmacWithSHA512-224", "hmacWithSHA512-224", NID_hmacWithSHA512_224, 8, &so[7745]},
+     {"hmacWithSHA512-256", "hmacWithSHA512-256", NID_hmacWithSHA512_256, 8, &so[7753]},
++    {"ChaCha20-Poly1305-D", "chacha20-poly1305-draft", NID_chacha20_poly1305_draft},
+ };
+ 
+-#define NUM_SN 1186
++#define NUM_SN 1187
+ static const unsigned int sn_objs[NUM_SN] = {
+      364,    /* "AD_DVCS" */
+      419,    /* "AES-128-CBC" */
+@@ -2395,6 +2396,7 @@ static const unsigned int sn_objs[NUM_SN] = {
+      417,    /* "CSPName" */
+     1019,    /* "ChaCha20" */
+     1018,    /* "ChaCha20-Poly1305" */
++    1195,    /* "ChaCha20-Poly1305-D" */
+      367,    /* "CrlID" */
+      391,    /* "DC" */
+       31,    /* "DES-CBC" */
+@@ -3467,7 +3469,7 @@ static const unsigned int sn_objs[NUM_SN] = {
+     1093,    /* "x509ExtAdmission" */
+ };
+ 
+-#define NUM_LN 1186
++#define NUM_LN 1187
+ static const unsigned int ln_objs[NUM_LN] = {
+      363,    /* "AD Time Stamping" */
+      405,    /* "ANSI X9.62" */
+@@ -3846,6 +3848,7 @@ static const unsigned int ln_objs[NUM_LN] = {
+      883,    /* "certificateRevocationList" */
+     1019,    /* "chacha20" */
+     1018,    /* "chacha20-poly1305" */
++    1195,    /* "chacha20-poly1305-draft" */
+       54,    /* "challengePassword" */
+      407,    /* "characteristic-two-field" */
+      395,    /* "clearance" */
+diff -u a/crypto/objects/objects.txt b/crypto/objects/objects.txt
+--- a/crypto/objects/objects.txt
++++ b/crypto/objects/objects.txt
+@@ -1535,6 +1535,7 @@
+ 			: AES-256-CBC-HMAC-SHA256	: aes-256-cbc-hmac-sha256
+ 			: ChaCha20-Poly1305		: chacha20-poly1305
+ 			: ChaCha20			: chacha20
++			: ChaCha20-Poly1305-D		: chacha20-poly1305-draft
+ 
+ ISO-US 10046 2 1	: dhpublicnumber		: X9.42 DH
+ 
+diff -u a/crypto/objects/obj_mac.num b/crypto/objects/obj_mac.num
+--- a/crypto/objects/obj_mac.num
++++ b/crypto/objects/obj_mac.num
+@@ -1192,3 +1192,4 @@ magma_cfb		1191
+ magma_mac		1192
+ hmacWithSHA512_224		1193
+ hmacWithSHA512_256		1194
++chacha20_poly1305_draft		1195
+\ No newline at end of file
+diff -u a/include/openssl/evp.h b/include/openssl/evp.h
+--- a/include/openssl/evp.h	2018-09-11
++++ b/include/openssl/evp.h	2018-10-06
+@@ -919,6 +919,7 @@
+ const EVP_CIPHER *EVP_chacha20(void);
+ #  ifndef OPENSSL_NO_POLY1305
+ const EVP_CIPHER *EVP_chacha20_poly1305(void);
++const EVP_CIPHER *EVP_chacha20_poly1305_draft(void);
+ #  endif
+ # endif
+ 
+diff -u -r a/include/openssl/obj_mac.h b/include/openssl/obj_mac.h
+--- a/include/openssl/obj_mac.h
++++ b/include/openssl/obj_mac.h
+@@ -4811,6 +4811,10 @@
+ #define LN_chacha20             "chacha20"
+ #define NID_chacha20            1019
+ 
++#define SN_chacha20_poly1305_draft             "ChaCha20-Poly1305-D"
++#define LN_chacha20_poly1305_draft             "chacha20-poly1305-draft"
++#define NID_chacha20_poly1305_draft            1195
++
+ #define SN_dhpublicnumber               "dhpublicnumber"
+ #define LN_dhpublicnumber               "X9.42 DH"
+ #define NID_dhpublicnumber              920
+diff -u a/include/openssl/ssl.h b/include/openssl/ssl.h
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -124,6 +124,8 @@
+ # define SSL_TXT_CAMELLIA128     "CAMELLIA128"
+ # define SSL_TXT_CAMELLIA256     "CAMELLIA256"
+ # define SSL_TXT_CAMELLIA        "CAMELLIA"
++# define SSL_TXT_CHACHA20POLY1305        "CHACHA20-Poly1305"
++# define SSL_TXT_CHACHA20POLY1305_D      "CHACHA20-Poly1305-D"
+ # define SSL_TXT_CHACHA20        "CHACHA20"
+ # define SSL_TXT_GOST            "GOST89"
+ # define SSL_TXT_ARIA            "ARIA"
+diff -u a/include/openssl/tls1.h b/include/openssl/tls1.h
+--- a/include/openssl/tls1.h
++++ b/include/openssl/tls1.h
+@@ -597,7 +597,12 @@ __owur int SSL_check_chain(SSL *s, X509 *x, EVP_PKEY *pk, STACK_OF(X509) *chain)
+ # define TLS1_CK_ECDHE_PSK_WITH_CAMELLIA_128_CBC_SHA256   0x0300C09A
+ # define TLS1_CK_ECDHE_PSK_WITH_CAMELLIA_256_CBC_SHA384   0x0300C09B
+ 
+-/* draft-ietf-tls-chacha20-poly1305-03 */
++/* Chacha20-Poly1305-Draft ciphersuites from draft-agl-tls-chacha20poly1305-04 */
++# define TLS1_CK_ECDHE_RSA_WITH_CHACHA20_POLY1305_D       0x0300CC13
++# define TLS1_CK_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_D     0x0300CC14
++# define TLS1_CK_DHE_RSA_WITH_CHACHA20_POLY1305_D         0x0300CC15
++
++/* Chacha20-Poly1305 ciphersuites from RFC7905 */
+ # define TLS1_CK_ECDHE_RSA_WITH_CHACHA20_POLY1305         0x0300CCA8
+ # define TLS1_CK_ECDHE_ECDSA_WITH_CHACHA20_POLY1305       0x0300CCA9
+ # define TLS1_CK_DHE_RSA_WITH_CHACHA20_POLY1305           0x0300CCAA
+@@ -1090,7 +1095,12 @@
+ # define TLS1_TXT_ECDH_RSA_WITH_CAMELLIA_128_CBC_SHA256    "ECDH-RSA-CAMELLIA128-SHA256"
+ # define TLS1_TXT_ECDH_RSA_WITH_CAMELLIA_256_CBC_SHA384    "ECDH-RSA-CAMELLIA256-SHA384"
+ 
+-/* draft-ietf-tls-chacha20-poly1305-03 */
++/* Chacha20-Poly1305-Draft ciphersuites from draft-agl-tls-chacha20poly1305-04 */
++# define TLS1_TXT_ECDHE_RSA_WITH_CHACHA20_POLY1305_D       "ECDHE-RSA-CHACHA20-POLY1305-D"
++# define TLS1_TXT_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_D     "ECDHE-ECDSA-CHACHA20-POLY1305-D"
++# define TLS1_TXT_DHE_RSA_WITH_CHACHA20_POLY1305_D         "DHE-RSA-CHACHA20-POLY1305-D"
++
++/* Chacha20-Poly1305 ciphersuites from RFC7905 */
+ # define TLS1_TXT_ECDHE_RSA_WITH_CHACHA20_POLY1305         "ECDHE-RSA-CHACHA20-POLY1305"
+ # define TLS1_TXT_ECDHE_ECDSA_WITH_CHACHA20_POLY1305       "ECDHE-ECDSA-CHACHA20-POLY1305"
+ # define TLS1_TXT_DHE_RSA_WITH_CHACHA20_POLY1305           "DHE-RSA-CHACHA20-POLY1305"
+diff -u a/ssl/s3_lib.c b/ssl/s3_lib.c
+--- a/ssl/s3_lib.c
++++ b/ssl/s3_lib.c
+@@ -2034,6 +2034,55 @@
+      },
+ 
+ #if !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305)
++     {
++      1,
++      TLS1_TXT_DHE_RSA_WITH_CHACHA20_POLY1305_D,
++      "OLD_TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
++      TLS1_CK_DHE_RSA_WITH_CHACHA20_POLY1305_D,
++      SSL_kDHE,
++      SSL_aRSA,
++      SSL_CHACHA20POLY1305_D,
++      SSL_AEAD,
++      TLS1_2_VERSION, TLS1_2_VERSION,
++      DTLS1_2_VERSION, DTLS1_2_VERSION,
++      SSL_HIGH,
++      SSL_HANDSHAKE_MAC_SHA256 | TLS1_PRF_SHA256,
++      256,
++      256,
++     },
++    {
++     1,
++     TLS1_TXT_ECDHE_RSA_WITH_CHACHA20_POLY1305_D,
++     "OLD_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
++     TLS1_CK_ECDHE_RSA_WITH_CHACHA20_POLY1305_D,
++     SSL_kECDHE,
++     SSL_aRSA,
++     SSL_CHACHA20POLY1305_D,
++     SSL_AEAD,
++     TLS1_2_VERSION, TLS1_2_VERSION,
++     DTLS1_2_VERSION, DTLS1_2_VERSION,
++     SSL_HIGH,
++     SSL_HANDSHAKE_MAC_SHA256 | TLS1_PRF_SHA256,
++     256,
++     256,
++     },
++    {
++     1,
++     TLS1_TXT_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_D,
++     "OLD_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
++     TLS1_CK_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_D,
++     SSL_kECDHE,
++     SSL_aECDSA,
++     SSL_CHACHA20POLY1305_D,
++     SSL_AEAD,
++     TLS1_2_VERSION, TLS1_2_VERSION,
++     DTLS1_2_VERSION, DTLS1_2_VERSION,
++     SSL_HIGH,
++     SSL_HANDSHAKE_MAC_SHA256 | TLS1_PRF_SHA256,
++     256,
++     256,
++    },
++
+     {
+      1,
+      TLS1_TXT_DHE_RSA_WITH_CHACHA20_POLY1305,
+diff -u a/ssl/ssl_ciph.c b/ssl/ssl_ciph.c
+--- a/ssl/ssl_ciph.c
++++ b/ssl/ssl_ciph.c
+@@ -40,10 +40,11 @@
+ #define SSL_ENC_AES128CCM8_IDX  16
+ #define SSL_ENC_AES256CCM8_IDX  17
+ #define SSL_ENC_GOST8912_IDX    18
+-#define SSL_ENC_CHACHA_IDX      19
++#define SSL_ENC_CHACHA20POLY1305_IDX 19
+ #define SSL_ENC_ARIA128GCM_IDX  20
+ #define SSL_ENC_ARIA256GCM_IDX  21
+-#define SSL_ENC_NUM_IDX         22
++#define SSL_ENC_CHACHA20POLY1305_D_IDX 22
++#define SSL_ENC_NUM_IDX         23
+ 
+ /* NB: make sure indices in these tables match values above */
+ 
+@@ -73,9 +74,10 @@
+     {SSL_AES128CCM8, NID_aes_128_ccm}, /* SSL_ENC_AES128CCM8_IDX 16 */
+     {SSL_AES256CCM8, NID_aes_256_ccm}, /* SSL_ENC_AES256CCM8_IDX 17 */
+     {SSL_eGOST2814789CNT12, NID_gost89_cnt_12}, /* SSL_ENC_GOST8912_IDX 18 */
+-    {SSL_CHACHA20POLY1305, NID_chacha20_poly1305}, /* SSL_ENC_CHACHA_IDX 19 */
++    {SSL_CHACHA20POLY1305, NID_chacha20_poly1305}, /* SSL_ENC_CHACHA20POLY1305_IDX 19 */
+     {SSL_ARIA128GCM, NID_aria_128_gcm}, /* SSL_ENC_ARIA128GCM_IDX 20 */
+     {SSL_ARIA256GCM, NID_aria_256_gcm}, /* SSL_ENC_ARIA256GCM_IDX 21 */
++    {SSL_CHACHA20POLY1305_D, NID_chacha20_poly1305_draft}, /* SSL_ENC_CHACHA20POLY1305_IDX 22 */
+ };
+ 
+ static const EVP_CIPHER *ssl_cipher_methods[SSL_ENC_NUM_IDX];
+@@ -274,6 +276,8 @@
+     {0, SSL_TXT_CAMELLIA128, NULL, 0, 0, 0, SSL_CAMELLIA128},
+     {0, SSL_TXT_CAMELLIA256, NULL, 0, 0, 0, SSL_CAMELLIA256},
+     {0, SSL_TXT_CAMELLIA, NULL, 0, 0, 0, SSL_CAMELLIA},
++    {0, SSL_TXT_CHACHA20POLY1305, NULL, 0, 0, 0, SSL_CHACHA20POLY1305},
++    {0, SSL_TXT_CHACHA20POLY1305_D, NULL, 0, 0, 0, SSL_CHACHA20POLY1305_D},
+     {0, SSL_TXT_CHACHA20, NULL, 0, 0, 0, SSL_CHACHA20},
+ 
+     {0, SSL_TXT_ARIA, NULL, 0, 0, 0, SSL_ARIA},
+@@ -1791,6 +1795,9 @@
+     case SSL_CHACHA20POLY1305:
+         enc = "CHACHA20/POLY1305(256)";
+         break;
++    case SSL_CHACHA20POLY1305_D:
++        enc = "CHACHA20/POLY1305-Draft(256)";
++        break;
+     default:
+         enc = "unknown";
+         break;
+@@ -2115,7 +2121,7 @@ int ssl_cipher_get_overhead(const SSL_CIPHER *c, size_t *mac_overhead,
+         out = EVP_CCM_TLS_EXPLICIT_IV_LEN + 16;
+     } else if (c->algorithm_enc & (SSL_AES128CCM8 | SSL_AES256CCM8)) {
+         out = EVP_CCM_TLS_EXPLICIT_IV_LEN + 8;
+-    } else if (c->algorithm_enc & SSL_CHACHA20POLY1305) {
++    } else if (c->algorithm_enc & (SSL_CHACHA20POLY1305 | SSL_CHACHA20POLY1305_D)) {
+         out = 16;
+     } else if (c->algorithm_mac & SSL_AEAD) {
+         /* We're supposed to have handled all the AEAD modes above */
+diff -u a/ssl/ssl_local.h b/ssl/ssl_local.h
+--- a/ssl/ssl_local.h
++++ b/ssl/ssl_local.h
+@@ -230,12 +230,13 @@
+ # define SSL_CHACHA20POLY1305    0x00080000U
+ # define SSL_ARIA128GCM          0x00100000U
+ # define SSL_ARIA256GCM          0x00200000U
++# define SSL_CHACHA20POLY1305_D  0x00400000U
+ 
+ # define SSL_AESGCM              (SSL_AES128GCM | SSL_AES256GCM)
+ # define SSL_AESCCM              (SSL_AES128CCM | SSL_AES256CCM | SSL_AES128CCM8 | SSL_AES256CCM8)
+ # define SSL_AES                 (SSL_AES128|SSL_AES256|SSL_AESGCM|SSL_AESCCM)
+ # define SSL_CAMELLIA            (SSL_CAMELLIA128|SSL_CAMELLIA256)
+-# define SSL_CHACHA20            (SSL_CHACHA20POLY1305)
++# define SSL_CHACHA20            (SSL_CHACHA20POLY1305 | SSL_CHACHA20POLY1305_D)
+ # define SSL_ARIAGCM             (SSL_ARIA128GCM | SSL_ARIA256GCM)
+ # define SSL_ARIA                (SSL_ARIAGCM)
+ 
+diff -u a/util/libcrypto.num ob/util/libcrypto.num
+--- a/util/libcrypto.num
++++ b/util/libcrypto.num
+@@ -4591,3 +4591,4 @@
+ X509_REQ_set0_signature                 4545	1_1_1h	EXIST::FUNCTION:
+ X509_REQ_set1_signature_algo            4546	1_1_1h	EXIST::FUNCTION:
+ EC_KEY_decoded_from_explicit_params     4547	1_1_1h	EXIST::FUNCTION:EC
++EVP_chacha20_poly1305_draft             4548	1_1_0	EXIST::FUNCTION:CHACHA,POLY1305

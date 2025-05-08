@@ -3,6 +3,11 @@ sslconfig
 
 Cloudflare's Internet facing SSL cipher configuration
 
+Table of Contents
+-----------------
+1. [ChaCha20/Poly1305 patch](#chacha20poly1305-patch)
+2. [Creating Certificates and Encrypting Emails on a Windows Machine](#creating-certificates-and-encrypting-emails-on-a-windows-machine)
+
 This repository tracks the history of the SSL cipher configuration used for
 Cloudflare's public-facing SSL web servers. The repository tracks an internal
 Cloudflare repository, but dates may not exactly match when changes are made.
